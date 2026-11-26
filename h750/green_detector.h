@@ -46,6 +46,17 @@ typedef struct {
 /* 在 YUV422 帧上执行完整检测。返回 0 成功，非 0 参数错误。 */
 int green_detect(const uint8_t *yuv422, dart_detection *out);
 
+/* 分阶段墙钟耗时；同一帧多个候选在对应阶段累加，未执行阶段为0。
+ * 时钟由调用方提供（微秒、uint32_t回绕），算法本身仍不依赖HAL。 */
+enum {
+    DET_TIME_INIT, DET_TIME_MASKS, DET_TIME_MEDIAN_GREEN, DET_TIME_MEDIAN_CORE,
+    DET_TIME_SCAN, DET_TIME_FLOOD, DET_TIME_CONTOUR, DET_TIME_SHAPE,
+    DET_TIME_SUPPORT, DET_TIME_SCORE, DET_TIME_COUNT
+};
+typedef struct { uint32_t stage_us[DET_TIME_COUNT]; } dart_detection_timing;
+int green_detect_profiled(const uint8_t *yuv422, dart_detection *out,
+                          dart_detection_timing *timing, uint32_t (*now_us)(void));
+
 /* 把检测结果显示到 YUV422 帧上：黄圈、红十字、红点与中心坐标文本。
  * found=0 时只在左上角绘制 NOT FOUND。坐标文本单位为像素。 */
 void green_annotate(uint8_t *yuv422, const dart_detection *det,

@@ -272,7 +272,7 @@ static void process_frame(const uint8_t *bytes, uint32_t time)
     timing.result = PROFILE_PROCESS_ERROR;
     unsigned frame_index = saved_frames;
     dart_detection det;
-    int result = green_detect(bytes, &det);
+    int result = green_detect_profiled(bytes, &det, &timing.detection, board_micros);
     t1 = board_micros();
     timing.stage_us[0] = t1 - t0;
     if (result) { failed = 1; t4 = t1; goto profile_complete; }
@@ -374,7 +374,7 @@ static int export_profile(void)
                             (UINT)strlen(record_profile_csv_header)) != FR_OK;
     unsigned used = 0;
     for (uint32_t i = 0; i < frame_profile.stored && !error; ++i) {
-        char line[256];
+        char line[RECORD_PROFILE_CSV_LINE_CAPACITY];
         int n = record_profile_csv_line(line, sizeof(line), i + 1, &frame_profile.rows[i]);
         if (n < 0 || (unsigned)n >= sizeof(line)) { error = 1; break; }
         if (used + (unsigned)n > sizeof(log_buffer)) {
@@ -427,6 +427,13 @@ static void write_profile_info(FIL *info)
         DART_JPEG_QUALITY, (unsigned long)jpeg_hw_pack_us, (unsigned long)jpeg_hw_poll_us,
         (unsigned long)jpeg_hw_error, (unsigned long)jpeg_hw_hal_error);
     if (n < 0 || (unsigned)n >= sizeof(text) || write_exact(info, text, (UINT)n) != FR_OK) failed = 1;
+    for (unsigned i = 0; i < DET_TIME_COUNT; ++i) {
+        n = snprintf(text, sizeof(text), "识别分步 %s 平均=%lu us；最大=%lu us。\r\n",
+            record_profile_detection_names[i],
+            (unsigned long)(frame_profile.detection_sum[i] / divisor),
+            (unsigned long)frame_profile.detection_max[i]);
+        if (n < 0 || (unsigned)n >= sizeof(text) || write_exact(info, text, (UINT)n) != FR_OK) failed = 1;
+    }
 }
 static void write_info(void)
 {

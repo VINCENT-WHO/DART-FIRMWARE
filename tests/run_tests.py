@@ -17,6 +17,18 @@ profile_exe=out/('test_record_profile.exe' if os.name=='nt' else 'test_record_pr
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-I'+str(ROOT/'h750'),
     str(ROOT/'tests/test_record_profile.c'),str(ROOT/'h750/record_profile.c'),'-o',str(profile_exe)],check=True)
 subprocess.run([str(profile_exe)],check=True)
+detector_exe=out/('test_detector_timing.exe' if os.name=='nt' else 'test_detector_timing')
+subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
+    '-Wno-misleading-indentation','-I'+str(ROOT/'h750'),
+    str(ROOT/'tests/test_detector_timing.c'),str(ROOT/'h750/green_detector.c'),
+    '-o',str(detector_exe),'-lm'],check=True)
+subprocess.run([str(detector_exe)],check=True)
+median_exe=out/('test_median_sliding.exe' if os.name=='nt' else 'test_median_sliding')
+subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
+    '-Wno-misleading-indentation','-I'+str(ROOT/'h750'),
+    str(ROOT/'tests/test_median_sliding.c'),str(ROOT/'tests/median_test_bridge.c'),
+    '-o',str(median_exe),'-lm'],check=True)
+subprocess.run([str(median_exe)],check=True)
 for n in range(81):
     payload=bytes((i*31)%256 for i in range(n));assert decode(encode(19,n,payload))==(19,n,payload)
 assert signed_delta(50,0xfffffff0)==66
@@ -52,6 +64,6 @@ try:
     cap.release();assert decoded==3
     avi_result='PASS'
 except ImportError:print('Pillow/OpenCV unavailable: skipped generated JPEG/AVI decode');avi_result='NOT RUN'
-report={'result':'PASS','c_randomized_cases':10000,'python_wire_lengths':81,'crc_corruption_and_truncated_tail':'PASS','timestamp_wrap_and_sync':'PASS','imu_gap_detection':'PASS','generated_avi_decode':avi_result,'record_profile_capacity_errors_csv_reset':'PASS','hardware':'NOT RUN'}
+report={'result':'PASS','c_randomized_cases':10000,'python_wire_lengths':81,'crc_corruption_and_truncated_tail':'PASS','timestamp_wrap_and_sync':'PASS','imu_gap_detection':'PASS','generated_avi_decode':avi_result,'record_profile_capacity_errors_csv_reset':'PASS','detector_timing_wrap_rejection_multiple_candidates':'PASS','sliding_median_immutable_reference_and_guards':'PASS','hardware':'NOT RUN'}
 (out/'validation.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
 print(json.dumps(report,indent=2))

@@ -66,7 +66,9 @@ static inline uint8_t pix_cr(const uint8_t *frame, int idx)
 
 /* 3x3 二值中值滤波（边界复制），等价 cv::medianBlur(mask, mask, 3)。
  * 掩膜为二值（0/255）：9 个值的中值 = 多数表决（>=5 个非零输出 255），
- * 与通用 median9 排序结果逐位一致，但省去排序网络。
+ * 滑动直方图只需两个桶：hist[255]=ones，hist[0]=9-ones。
+ * 每次右移减去最左列、加入最右列，不重新统计整个窗口；每像素O(3)。
+ * 三个列计数循环复用，新增列只读取3个像素，不分配256桶灰度直方图。
  * 三行缓存只保留原始输入；不能重新读取已被输出覆盖的上一行。 */
 static void median3(uint8_t *mask, uint8_t rows[3][W])
 {
@@ -77,13 +79,20 @@ static void median3(uint8_t *mask, uint8_t rows[3][W])
     memcpy(r2, mask + (H > 1 ? W : 0), W);
     for (int y = 0; y < H; y++) {
         uint8_t *dst = mask + y * W;
+        int left = (r0[0] != 0) + (r1[0] != 0) + (r2[0] != 0);
+        int center = left; /* 左边界复制：窗口首两列均为原图第0列。 */
+        int right_x = W > 1 ? 1 : 0;
+        int right = (r0[right_x] != 0) + (r1[right_x] != 0) + (r2[right_x] != 0);
+        int ones = left + center + right;
         for (int x = 0; x < W; x++) {
-            int xl = x > 0 ? x - 1 : 0;
-            int xr = x < W - 1 ? x + 1 : W - 1;
-            int ones = (r0[xl] != 0) + (r0[x] != 0) + (r0[xr] != 0)
-                     + (r1[xl] != 0) + (r1[x] != 0) + (r1[xr] != 0)
-                     + (r2[xl] != 0) + (r2[x] != 0) + (r2[xr] != 0);
             dst[x] = ones >= 5 ? 255 : 0;
+            if (x + 1 < W) {
+                int incoming_x = x + 2 < W ? x + 2 : W - 1;
+                int incoming = (r0[incoming_x] != 0) + (r1[incoming_x] != 0)
+                             + (r2[incoming_x] != 0);
+                ones += incoming - left;
+                left = center; center = right; right = incoming;
+            }
         }
         if (y + 1 < H) {
             /* 轮换指针而非覆盖原图行；新读取的y+2行尚未写入输出。
@@ -314,16 +323,47 @@ static void green_neighborhood(int bx, int by, int bw, int bh,
 
 /* ---------------- 主检测入口 ---------------- */
 
+typedef struct {
+    dart_detection_timing *timing;
+    uint32_t (*now_us)(void);
+    uint32_t last;
+    unsigned stage;
+} detection_clock;
+
+/* 连续区间只归属一个阶段；continue路径也必须先结算当前候选阶段。
+ * 只在阶段边界读时钟，不在像素循环内读时钟或输出日志。 */
+static void timing_next(detection_clock *clock, unsigned stage)
+{
+    if (!clock->timing) return;
+    uint32_t now = clock->now_us();
+    clock->timing->stage_us[clock->stage] += now - clock->last;
+    clock->last = now;
+    clock->stage = stage;
+}
+
 int green_detect(const uint8_t *yuv422, dart_detection *out)
 {
+    return green_detect_profiled(yuv422, out, NULL, NULL);
+}
+
+int green_detect_profiled(const uint8_t *yuv422, dart_detection *out,
+                          dart_detection_timing *timing, uint32_t (*now_us)(void))
+{
+    if (timing) memset(timing, 0, sizeof(*timing));
+    if (timing && !now_us) return -1;
     if (!yuv422 || !out) return -1;
+    detection_clock clock = {timing, now_us, timing ? now_us() : 0, DET_TIME_INIT};
     memset(out, 0, sizeof(*out));
     det_eval_frames++;
     if (!kernel_offsets_ready) init_kernel_offsets();
 
+    timing_next(&clock, DET_TIME_MASKS);
     build_masks(yuv422);
+    timing_next(&clock, DET_TIME_MEDIAN_GREEN);
     median3(green_mask, med_rows_a);
+    timing_next(&clock, DET_TIME_MEDIAN_CORE);
     median3(core_mask, med_rows_b);
+    timing_next(&clock, DET_TIME_SCAN);
 
     /* 逐个处理灯芯掩膜的外连通域。起点判据：域内像素且左侧不在域内，
      * 与 cv::findContours 外轮廓起点的常见情形一致；凹陷形状的完整外边界
@@ -335,11 +375,13 @@ int green_detect(const uint8_t *yuv422, dart_detection *out)
             if (!core_mask[idx]) continue;
             if (x > 0 && core_mask[idx - 1]) continue;
 
+            timing_next(&clock, DET_TIME_FLOOD);
             int bx, by, bw, bh;
             int64_t sum_x, sum_y;
             uint32_t pixels = flood_component(x, y, &bx, &by, &bw, &bh, &sum_x, &sum_y);
-            if (!pixels) continue;   /* 栈溢出：放弃该域 */
+            if (!pixels) goto candidate_done;   /* 栈溢出：放弃该域 */
 
+            timing_next(&clock, DET_TIME_CONTOUR);
             /* 外接矩形尺寸先于面积参与筛选（与 OpenCV 判序一致：面积->长宽比）。 */
             double area = 0.0;
             int64_t area_x2;
@@ -347,31 +389,34 @@ int green_detect(const uint8_t *yuv422, dart_detection *out)
             int32_t max_d2;
             int cx_int = (int)(sum_x / pixels);
             int cy_int = (int)(sum_y / pixels);
-            if (!trace_boundary(x, y, cx_int, cy_int, &perimeter, &area_x2, &max_d2)) continue;
+            if (!trace_boundary(x, y, cx_int, cy_int, &perimeter, &area_x2, &max_d2)) goto candidate_done;
+            timing_next(&clock, DET_TIME_SHAPE);
             area = (double)area_x2 * 0.5;
 
             /* 1) 轮廓多边形面积范围：[280, 0.08*总像素=6144] 像素^2。 */
-            if (area < (double)DART_DET_AREA_MIN) continue;
-            if (area * 10000 > 0.08 * 10000.0 * (double)DART_DET_PIXELS) continue;
+            if (area < (double)DART_DET_AREA_MIN) goto candidate_done;
+            if (area * 10000 > 0.08 * 10000.0 * (double)DART_DET_PIXELS) goto candidate_done;
             /* 2) 外接矩形长短边比 <= 2.4。 */
             {
                 int longer = bw > bh ? bw : bh, shorter = bw < bh ? bw : bh;
-                if (longer * 5 > shorter * DART_DET_ASPECT_MAX) continue;
+                if (longer * 5 > shorter * DART_DET_ASPECT_MAX) goto candidate_done;
             }
             /* 3) 圆度 = 4*pi*area/perimeter^2 >= 0.35。 */
             double circularity = 0.0;
-            if (perimeter <= 0.0) continue;
+            if (perimeter <= 0.0) goto candidate_done;
             circularity = 4.0 * 3.14159265358979 * area / (perimeter * perimeter);
-            if (circularity < 0.35) continue;
+            if (circularity < 0.35) goto candidate_done;
+            timing_next(&clock, DET_TIME_SUPPORT);
             /* 4) 绿色邻域验证：膨胀集内绿晕像素 >= 20 且占比 >= 0.08。 */
             int support_count, green_count;
             green_neighborhood(bx, by, bw, bh, &support_count, &green_count);
-            if (green_count < DART_DET_GREEN_PIX_MIN) continue;
-            if ((int64_t)green_count * 10000 < (int64_t)support_count * DART_DET_GREEN_FRACTION_MIN) continue;
+            if (green_count < DART_DET_GREEN_PIX_MIN) goto candidate_done;
+            if ((int64_t)green_count * 10000 < (int64_t)support_count * DART_DET_GREEN_FRACTION_MIN) goto candidate_done;
+            timing_next(&clock, DET_TIME_SCORE);
             double green_fraction = support_count ? (double)green_count / support_count : 0.0;
             /* 5) 评分并保留最佳：score = area*(0.5+green_fraction)*(0.5+circularity)。 */
             double score = area * (0.5 + green_fraction) * (0.5 + circularity);
-            if (score <= best_score) continue;
+            if (score <= best_score) goto candidate_done;
             best_score = score;
             out->found = 1;
             out->center_x_q16 = (int32_t)((sum_x << 16) / pixels);
@@ -382,8 +427,11 @@ int green_detect(const uint8_t *yuv422, dart_detection *out)
             out->circularity_x500 = (int)(circularity * 500.0 + 0.5);
             out->green_fraction_x10000 = (int)(green_fraction * 10000.0 + 0.5);
             out->score_x10000 = (int32_t)(score * 10000.0 + 0.5);
+candidate_done:
+            timing_next(&clock, DET_TIME_SCAN);
         }
     }
     if (out->found) det_found_frames++;
+    timing_next(&clock, DET_TIME_SCAN);
     return 0;
 }
