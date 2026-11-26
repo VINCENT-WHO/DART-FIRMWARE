@@ -27,6 +27,11 @@ subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
     str(ROOT/'tests/test_rgb_detector.c'),str(ROOT/'h750/green_detector.c'),
     '-o',str(detector_exe),'-lm'],check=True)
 subprocess.run([str(detector_exe)],check=True)
+roi_exe=out/('test_detector_roi.exe' if os.name=='nt' else 'test_detector_roi')
+subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
+    '-Wno-misleading-indentation','-I'+str(ROOT/'h750'),
+    str(ROOT/'tests/test_detector_roi.c'),'-o',str(roi_exe),'-lm'],check=True)
+subprocess.run([str(roi_exe)],check=True)
 median_exe=out/('test_median_sliding.exe' if os.name=='nt' else 'test_median_sliding')
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
     '-Wno-misleading-indentation','-I'+str(ROOT/'h750'),
@@ -69,5 +74,6 @@ try:
     avi_result='PASS'
 except ImportError:print('Pillow/OpenCV unavailable: skipped generated JPEG/AVI decode');avi_result='NOT RUN'
 report={'result':'PASS','c_randomized_cases':10000,'python_wire_lengths':81,'crc_corruption_and_truncated_tail':'PASS','timestamp_wrap_and_sync':'PASS','imu_gap_detection':'PASS','generated_avi_decode':avi_result,'record_profile_capacity_errors_csv_reset':'PASS','rgb_detection_area_centroid_input_unchanged_and_timing':'PASS','fixed_exposure_register_logic':'PASS','sliding_median_immutable_reference_and_guards':'PASS','hardware':'NOT RUN'}
+report['roi_bounds_halo_motion_reacquire_reset']='PASS'
 (out/'validation.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
 print(json.dumps(report,indent=2))

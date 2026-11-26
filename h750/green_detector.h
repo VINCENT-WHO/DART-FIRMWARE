@@ -30,6 +30,9 @@ typedef struct {
 
 /* 在 YUV422 帧上执行完整检测。返回 0 成功，非 0 参数错误。 */
 int green_detect(const uint8_t *yuv422, dart_detection *out);
+/* 单路跨帧ROI：新会话/换输入源时重置，下一帧全图搜索。
+ * 检出后按包围盒中心放大1.5倍；局部丢失或触碰内部边界时当帧回退全图。 */
+void det_reset_tracking(void);
 
 /* 分阶段墙钟耗时；同一帧多个候选在对应阶段累加，未执行阶段为0。
  * 时钟由调用方提供（微秒、uint32_t回绕），算法本身仍不依赖HAL。 */
@@ -37,11 +40,16 @@ enum {
     DET_TIME_INIT, DET_TIME_MASKS, DET_TIME_MEDIAN_GREEN, DET_TIME_SCAN,
     DET_TIME_FLOOD, DET_TIME_AREA, DET_TIME_SCORE, DET_TIME_COUNT
 };
-typedef struct { uint32_t stage_us[DET_TIME_COUNT]; } dart_detection_timing;
+enum { DET_SEARCH_FULL, DET_SEARCH_ROI, DET_SEARCH_FALLBACK };
+typedef struct {
+    uint32_t stage_us[DET_TIME_COUNT];
+    uint16_t search_x, search_y, search_w, search_h; /* 本帧最初搜索框，全图坐标 */
+    uint32_t search_mode; /* 0全图，1局部，2局部后回退全图；耗时含两轮 */
+} dart_detection_timing;
 int green_detect_profiled(const uint8_t *yuv422, dart_detection *out,
                           dart_detection_timing *timing, uint32_t (*now_us)(void));
 
-/* 把检测结果显示到 YUV422 帧上：黄圈、红十字、红点与中心坐标文本。
+/* 把检测结果显示到 YUV422 帧上：黄色外接矩形、红十字、红点与中心坐标文本。
  * found=0 时只在左上角绘制 NOT FOUND。坐标文本单位为像素。 */
 void green_annotate(uint8_t *yuv422, const dart_detection *det,
                     int frame_index, int32_t time_ms_q8);

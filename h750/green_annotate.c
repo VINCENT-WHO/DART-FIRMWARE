@@ -1,6 +1,6 @@
-/* 机载标注绘制：把检测结果画到 YUV422 帧上——黄圈、红十字中心、
+/* 机载标注绘制：把检测结果画到 YUV422 帧上——黄色外接矩形、红十字中心、
  * 中心坐标文本、帧号与相对时间文本、未检出提示。与电脑端 annotate 的
- * 视觉约定一致：黄圈 2 像素粗，十字与中心点为红色，坐标单位为像素。 */
+ * 黄色矩形标出实际目标范围，十字与中心点为红色，坐标单位为像素。 */
 #include "green_detector.h"
 #include <string.h>
 
@@ -27,22 +27,17 @@ static void set_pixel(uint8_t *frame, int x, int y, uint8_t yv, uint8_t cb, uint
 #define RED_Y 76, 85, 255
 #define BLK_Y 16, 128, 128
 
-static void draw_circle(uint8_t *frame, int cx, int cy, int r, uint8_t yv, uint8_t cb, uint8_t cr)
+static void draw_box(uint8_t *frame, int x, int y, int w, int h,
+                      uint8_t yv, uint8_t cb, uint8_t cr)
 {
-    if (r <= 0) return;
-    int x = 0, yy = r, d = 1 - r;           /* 中点圆算法 */
-    while (x <= yy) {
-        set_pixel(frame, cx + x, cy + yy, yv, cb, cr);
-        set_pixel(frame, cx - x, cy + yy, yv, cb, cr);
-        set_pixel(frame, cx + x, cy - yy, yv, cb, cr);
-        set_pixel(frame, cx - x, cy - yy, yv, cb, cr);
-        set_pixel(frame, cx + yy, cy + x, yv, cb, cr);
-        set_pixel(frame, cx - yy, cy + x, yv, cb, cr);
-        set_pixel(frame, cx + yy, cy - x, yv, cb, cr);
-        set_pixel(frame, cx - yy, cy - x, yv, cb, cr);
-        if (d < 0) d += 2 * x + 3;
-        else { d += 2 * (x - yy) + 5; yy--; }
-        x++;
+    if (w <= 0 || h <= 0) return;
+    for (int xx = x; xx < x + w; ++xx) {
+        set_pixel(frame, xx, y, yv, cb, cr);
+        set_pixel(frame, xx, y + h - 1, yv, cb, cr);
+    }
+    for (int yy = y + 1; yy < y + h - 1; ++yy) {
+        set_pixel(frame, x, yy, yv, cb, cr);
+        set_pixel(frame, x + w - 1, yy, yv, cb, cr);
     }
 }
 
@@ -156,11 +151,8 @@ void green_annotate(uint8_t *yuv422, const dart_detection *det,
     }
     int cx = det->center_x_q16 >> 16;
     int cy = det->center_y_q16 >> 16;
-    int radius = det->radius;
-
-    /* 黄圈 2 像素粗（两个半径各一圈），与电脑端 cv::circle thickness=2 对应。 */
-    draw_circle(yuv422, cx, cy, radius, YEL_Y);
-    draw_circle(yuv422, cx, cy, radius - 1, YEL_Y);
+    /* 显示实际目标包围盒；1.5倍搜索框用于下一帧检测，不画入识别输入。 */
+    draw_box(yuv422, det->box_x, det->box_y, det->box_w, det->box_h, YEL_Y);
 
     /* 红色十字（臂长 11）与中心实心点（半径 2）。 */
     for (int d = -5; d <= 5; d++) {
@@ -172,7 +164,7 @@ void green_annotate(uint8_t *yuv422, const dart_detection *det,
             if (dx * dx + dy * dy <= 5)
                 set_pixel(yuv422, cx + dx, cy + dy, RED_Y);
 
-    /* 坐标文本 "(x.x, y.y)"：位于圈上方，随边界收紧防止出画。Q16 质心四舍
+    /* 坐标文本 "(x.x, y.y)"：位于矩形上方，随边界收紧防止出画。Q16 质心四舍
      * 五入到 0.1 像素（单位：像素）。 */
     uint32_t x10 = (uint32_t)(((int64_t)det->center_x_q16 * 10 + 32768) >> 16);
     uint32_t y10 = (uint32_t)(((int64_t)det->center_y_q16 * 10 + 32768) >> 16);
@@ -187,7 +179,7 @@ void green_annotate(uint8_t *yuv422, const dart_detection *det,
     int tx = cx - text_w / 2;
     if (tx < 2) tx = 2;
     if (tx > W - text_w - 2) tx = W - text_w - 2;
-    int ty = cy - radius - 5 - 7;           /* 顶行制：位于圈上缘 5 像素之上 */
+    int ty = det->box_y - 5 - 7;
     if (ty < 2) ty = 2;
     if (ty > H - 9) ty = H - 9;
     draw_text_shadow(yuv422, tx, ty, YEL_Y, line);

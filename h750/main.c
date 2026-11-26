@@ -21,7 +21,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DART_RECORDING_VERSION "2.2.0-rgb-3ms"
+#define DART_RECORDING_VERSION "2.2.1-rgb-roi3ms"
 
 extern int board_clock_start(void);
 extern int board_storage_start(void);
@@ -258,8 +258,8 @@ static void save_frame(const uint8_t *bytes, uint32_t n, uint32_t time)
 }
 /* 板内完整识别管线：检测 -> 标注 -> JPEG 编码 -> AVI 帧落盘 + DETECT.CSV 行。
  * bytes 指向相机 slot 里的 YUV422 帧（slot 已被 camera_take 持有，DMA 不会再写）；
- * 黄圈与坐标文本直接画在该缓冲内，随后整帧编码成 Baseline JPEG。
- * 标注在检测之后进行，因此圆环不会影响检测（阈值判定只看原始帧）。 */
+ * 外接矩形与坐标文本直接画在该缓冲内，随后整帧编码成 Baseline JPEG。
+ * 标注在检测之后进行，因此绘图不会影响检测（阈值判定只看原始帧）。 */
 static void process_frame(const uint8_t *bytes, uint32_t time)
 {
     if ((int32_t)(time - start_us) < 0 || (int32_t)(time - end_us) >= 0) return;
@@ -437,7 +437,8 @@ static void write_profile_info(FIL *info)
     }
     n = snprintf(text, sizeof(text),
         "曝光：固定目标=%lu us；整数行=%lu；配置时长=%lu ns；寄存器回读通过=%lu；增益自动。\r\n"
-        "RGB识别：G>=%u；2G-R-B>=%u；绿色连通域像素数=%u..%u；主目标取最大面积。\r\n",
+        "RGB识别：G>=%u；2G-R-B>=%u；绿色连通域像素数=%u..%u；搜索域内选最大区域。\r\n"
+        "ROI：上帧外接矩形中心不变，宽高1.5倍向外取整并裁到图像边界；丢失/内部触边当帧回退全图。\r\n",
         (unsigned long)DART_CAMERA_EXPOSURE_US,(unsigned long)DART_CAMERA_EXPOSURE_LINES,
         (unsigned long)DART_CAMERA_EXPOSURE_NS,(unsigned long)camera_exposure_verified,
         DART_DET_G_MIN,2*DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX);
@@ -454,7 +455,7 @@ static void write_info(void)
         "触发阈值：三轴加速度合量严格大于 2.000g，连续至少20ms。\r\n"
         "采集时间：触发确认后10秒；IMU另保留至多约0.2秒触发前数据。\r\n"
         "触发时刻：F103=%lu us；H750接收=%lu us（各自开机计时，无真实日期）。\r\n"
-        "录像：320x240 MJPEG（机内逐帧绿灯检测，画圈并标注中心坐标）；保存帧数=%lu，JPEG编码失败=%lu。\r\n"
+        "录像：320x240 MJPEG（机内逐帧绿灯检测，画外接矩形并标注中心）；保存帧数=%lu，JPEG编码失败=%lu。\r\n"
         "IMU原始记录=%lu条；CSV=%lu行；序号缺口=%lu。\r\n"
         "IMU队列溢出=%lu；串口CRC错误=%lu；UART错误=%lu。\r\n"
         "录像期间相机丢帧=%lu；无效帧=%lu；相机错误位=%lu。\r\n"
@@ -602,6 +603,7 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
     det_evals = det_hits = enc_fails = 0;
     t_detect_us = t_annotate_us = t_encode_us = t_write_us = t_frame_us = 0;
     record_profile_reset(&frame_profile); profile_export_us = profile_export_failed = 0;
+    det_reset_tracking(); det_reset_stats();
     pre_head = pre_count = 0; first_imu = 1; memset(&trigger, 0, sizeof(trigger));
     session_imu_overflows = imu_overflows; session_crc_errors = parser.errors; session_uart_errors = uart_errors;
     directory[0] = 0; state = PREPARING; send_led(); usb_tf_set_busy(1);
@@ -642,7 +644,7 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
             (unsigned long)DART_CAMERA_EXPOSURE_US,(unsigned long)DART_CAMERA_EXPOSURE_LINES,
             (unsigned long)DART_CAMERA_EXPOSURE_RAW,(unsigned long)camera_exposure_verified);
         log_event(config);
-        snprintf(config,sizeof(config),"RGB g=%u excess=%u area=%u..%u largest",
+        snprintf(config,sizeof(config),"RGB g=%u excess=%u area=%u..%u largest roi=1.5",
             DART_DET_G_MIN,DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX);
         log_event(config);
     }

@@ -21,6 +21,9 @@ int main(void)
     row.stage_us[2] = 30; row.stage_us[3] = 40;
     row.total_us = 100; row.avi_index = 0; row.camera_drops = 8;
     for (unsigned i = 0; i < DET_TIME_COUNT; ++i) row.detection.stage_us[i] = i + 1;
+    row.detection.search_x = 17; row.detection.search_y = 25;
+    row.detection.search_w = 31; row.detection.search_h = 43;
+    row.detection.search_mode = DET_SEARCH_FALLBACK;
     assert(record_profile_append(p, &row) == 0);
     record_profile_note_cycles(p, 0, 400);
     assert(p->rows[0].append_cycles == 400);
@@ -40,12 +43,12 @@ int main(void)
 
     char text[RECORD_PROFILE_CSV_LINE_CAPACITY];
     assert(record_profile_csv_line(text, sizeof(text), 1, &p->rows[0]) > 0);
-    assert(!strcmp(text, "1,0,1234,25,10,20,30,40,100,125,8,0,400,1,2,3,4,5,6,7\r\n"));
+    assert(!strcmp(text, "1,0,1234,25,10,20,30,40,100,125,8,0,400,1,2,3,4,5,6,7,17,25,31,43,2\r\n"));
     assert(record_profile_csv_line(text, sizeof(text), 2, &p->rows[1]) > 0);
-    assert(!strcmp(text, "2,,1234,25,10,20,90,0,120,145,8,2,600,1,2,3,4,5,6,7\r\n"));
+    assert(!strcmp(text, "2,,1234,25,10,20,90,0,120,145,8,2,600,1,2,3,4,5,6,7,17,25,31,43,2\r\n"));
     unsigned columns = 1;
     for (const char *c = record_profile_csv_header; *c; ++c) if (*c == ',') columns++;
-    assert(columns == 13 + DET_TIME_COUNT && !memcmp(record_profile_csv_header, "\xEF\xBB\xBF", 3));
+    assert(columns == 18 + DET_TIME_COUNT && !memcmp(record_profile_csv_header, "\xEF\xBB\xBF", 3));
     assert(record_profile_csv_line(text, 4, 2, &p->rows[1]) >= 4);
     assert(text[3] == '\0');
 

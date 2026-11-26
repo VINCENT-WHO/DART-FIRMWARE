@@ -22,6 +22,7 @@ static dart_detection check(int found)
     dart_detection a,b;dart_detection_timing timing;
     memcpy(original,frame,sizeof(frame));memset(&timing,0xa5,sizeof(timing));
     ticks=UINT32_MAX-10;calls=0;
+    det_reset_tracking(); /* 独立场景回归；跨帧行为由test_detector_roi覆盖。 */
     assert(green_detect_profiled(frame,&a,&timing,fake_micros)==0 && a.found==found);
     assert(!memcmp(frame,original,sizeof(frame)));
     uint32_t sum=0;
@@ -30,6 +31,7 @@ static dart_detection check(int found)
     assert(timing.stage_us[DET_TIME_INIT]==7 && timing.stage_us[DET_TIME_MASKS]==7);
     assert(timing.stage_us[DET_TIME_MEDIAN_GREEN]==7 && timing.stage_us[DET_TIME_SCAN]>0);
     uint32_t previous=calls;
+    det_reset_tracking();
     assert(green_detect(frame,&b)==0 && !memcmp(&a,&b,sizeof(a)) && calls==previous);
     assert(!memcmp(frame,original,sizeof(frame)));
     if(found) assert(timing.stage_us[DET_TIME_SCORE]>0);

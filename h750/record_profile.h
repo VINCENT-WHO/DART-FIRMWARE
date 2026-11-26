@@ -40,8 +40,8 @@ void record_profile_note_cycles(record_profile *profile, uint32_t slot, uint32_t
 /* 仅在采集停止后调用文本格式化；头部为UTF-8 BOM，单位在列名中。 */
 extern const char record_profile_csv_header[];
 extern const char *const record_profile_detection_names[DET_TIME_COUNT];
-/* 20列uint32十进制最大宽度及分隔符、CRLF、NUL的上界。 */
-#define RECORD_PROFILE_CSV_LINE_CAPACITY 256u
+/* 25列最宽十进制数及分隔符、CRLF、NUL的上界。 */
+#define RECORD_PROFILE_CSV_LINE_CAPACITY 288u
 int record_profile_csv_line(char *buffer, size_t capacity, uint32_t attempt,
                             const record_profile_row *row);
 
