@@ -4,6 +4,7 @@
 #include "stm32h7xx_hal.h"
 #include "camera_perf.h"
 #include "camera_slots.h"
+#include "camera_exposure.h"
 #include <string.h>
 #include <stdio.h>
 extern uint32_t board_micros(void);
@@ -18,18 +19,19 @@ static uint8_t *buffers[CAM_SLOT_COUNT];
 static camera_slots slots;
 static volatile unsigned active;
 volatile uint32_t camera_frames,camera_drops,camera_errors,camera_invalid;
+uint32_t camera_exposure_verified;
 static DMA_HandleTypeDef pdma;
 static unsigned configured;
 static int wr(unsigned a,unsigned b){return camera_write_register(a,b);}
 static int pair(unsigned a,unsigned v){return wr(a,v>>8)||wr(a+1,v&255);}
 static int change(unsigned a,unsigned mask,unsigned v){int old=camera_read_register(a);return old<0?-1:wr(a,((unsigned)old&~mask)|(v&mask));}
 int camera_configure(void){
-    configured=0;
+    configured=0;camera_exposure_verified=0;
     if(camera_perf_base())return -1;
     int e=0;e|=wr(0x3008,0x42);e|=wr(0x3039,0);e|=wr(0x3034,0x1A);
     e|=wr(0x3035,0x11);e|=wr(0x3036,0x78);e|=wr(0x3037,0x13);e|=wr(0x3108,1);
     e|=pair(0x3800,0);e|=pair(0x3802,4);e|=pair(0x3804,2623);e|=pair(0x3806,1951);
-    e|=pair(0x3808,320);e|=pair(0x380A,240);e|=pair(0x380C,1892);e|=pair(0x380E,1015);
+    e|=pair(0x3808,320);e|=pair(0x380A,240);e|=pair(0x380C,DART_CAMERA_HTS);e|=pair(0x380E,1015);
     e|=pair(0x3810,16);e|=pair(0x3812,6);e|=wr(0x3814,0x31);e|=wr(0x3815,0x31);
     e|=wr(0x3618,0);e|=wr(0x3612,0x29);e|=wr(0x3708,0x64);e|=wr(0x3709,0x52);e|=wr(0x370C,3);
     /* 翻转位（0x3820/0x3821 bit0）保留板级已验证组合；0x3821 bit5 是片上
@@ -43,14 +45,16 @@ int camera_configure(void){
     e|=wr(0x4713,3);e|=wr(0x4407,12);e|=wr(0x440E,0);
     e|=wr(0x460B,0x37);e|=wr(0x460C,0x22);e|=wr(0x3824,4);e|=wr(0x4740,0x23);
     e|=pair(0x4602,320);e|=pair(0x4604,240);
-    e|=wr(0x4001,2);e|=wr(0x4004,2);e|=change(0x3A00,4,0);e|=wr(0x3503,0);
-    /* 对照录像：自动曝光上限由1011行降到507行，仍允许相机自动调节曝光和增益。
-     * 保留一档50 Hz防频闪步长，并使两种频率的最大步数与新上限一致。 */
-    const unsigned exposure_limit_lines=507, band_50_lines=507, band_60_lines=423;
-    e|=pair(0x3A02,exposure_limit_lines);e|=pair(0x3A14,exposure_limit_lines);
+    e|=wr(0x4001,2);e|=wr(0x4004,2);e|=change(0x3A00,4,0);
+    /* AEC关闭并写入固定快门，保留AGC；防频闪配置不再用于决定快门时长。 */
+    const unsigned band_50_lines=507, band_60_lines=423;
+    e|=pair(0x3A02,DART_CAMERA_EXPOSURE_LINES);e|=pair(0x3A14,DART_CAMERA_EXPOSURE_LINES);
     e|=pair(0x3A08,band_50_lines);e|=pair(0x3A0A,band_60_lines);
-    e|=wr(0x3A0E,exposure_limit_lines/band_50_lines);e|=wr(0x3A0D,exposure_limit_lines/band_60_lines);
-    e|=pair(0x350C,0);e|=wr(0x503D,0);e|=wr(0x3008,2);HAL_Delay(600);
+    e|=wr(0x3A0E,1);e|=wr(0x3A0D,1);
+    e|=pair(0x350C,0);e|=camera_apply_fixed_exposure(camera_read_register,camera_write_register);
+    e|=wr(0x503D,0);e|=wr(0x3008,2);HAL_Delay(600);
+    e|=camera_verify_fixed_exposure(camera_read_register);
+    camera_exposure_verified=e==0;
     configured=e==0;return e;
 }
 void camera_timing(void){

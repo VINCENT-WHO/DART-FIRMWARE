@@ -15,3 +15,4 @@ void camera_stop(void);
 int camera_take(const uint8_t **bytes,uint32_t *length,uint32_t *time_us);
 void camera_release(unsigned slot);
 extern volatile uint32_t camera_frames,camera_drops,camera_errors,camera_invalid;
+extern uint32_t camera_exposure_verified;

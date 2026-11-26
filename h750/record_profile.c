@@ -6,12 +6,12 @@
 const char record_profile_csv_header[] = "\xEF\xBB\xBF"
     "处理序号,AVI帧号_从0开始,帧完成相对触发_us,排队_us,图像处理_us,绘图_us,"
     "JPEG编码_us,保存_us,处理总计_us,帧完成至保存_us,相机累计丢帧,结果码,RAM追加_cycles,"
-    "识别初始化_us,双掩膜生成_us,绿晕中值_us,灯芯中值_us,扫描及收尾_us,"
-    "连通域_us,轮廓跟踪_us,形状筛选_us,绿色邻域验证_us,评分选优_us\r\n";
+    "识别初始化_us,RGB绿色二值化_us,绿色中值_us,扫描及收尾_us,"
+    "绿色连通域_us,面积筛选_us,最大目标选择_us\r\n";
 
 const char *const record_profile_detection_names[DET_TIME_COUNT] = {
-    "识别初始化", "双掩膜生成", "绿晕中值", "灯芯中值", "扫描及收尾",
-    "连通域", "轮廓跟踪", "形状筛选", "绿色邻域验证", "评分选优"
+    "识别初始化", "RGB绿色二值化", "绿色中值", "扫描及收尾",
+    "绿色连通域", "面积筛选", "最大目标选择"
 };
 
 void record_profile_reset(record_profile *profile)
@@ -62,7 +62,7 @@ int record_profile_csv_line(char *buffer, size_t capacity, uint32_t attempt,
         snprintf(index, sizeof(index), "%lu", (unsigned long)row->avi_index);
     return snprintf(buffer, capacity,
         "%lu,%s,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,"
-        "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
+        "%lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
         (unsigned long)attempt, index, (unsigned long)row->capture_us,
         (unsigned long)row->queue_us,
         (unsigned long)row->stage_us[0], (unsigned long)row->stage_us[1],
@@ -73,11 +73,8 @@ int record_profile_csv_line(char *buffer, size_t capacity, uint32_t attempt,
         (unsigned long)row->detection.stage_us[DET_TIME_INIT],
         (unsigned long)row->detection.stage_us[DET_TIME_MASKS],
         (unsigned long)row->detection.stage_us[DET_TIME_MEDIAN_GREEN],
-        (unsigned long)row->detection.stage_us[DET_TIME_MEDIAN_CORE],
         (unsigned long)row->detection.stage_us[DET_TIME_SCAN],
         (unsigned long)row->detection.stage_us[DET_TIME_FLOOD],
-        (unsigned long)row->detection.stage_us[DET_TIME_CONTOUR],
-        (unsigned long)row->detection.stage_us[DET_TIME_SHAPE],
-        (unsigned long)row->detection.stage_us[DET_TIME_SUPPORT],
+        (unsigned long)row->detection.stage_us[DET_TIME_AREA],
         (unsigned long)row->detection.stage_us[DET_TIME_SCORE]);
 }

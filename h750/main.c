@@ -7,6 +7,7 @@
 #include "auto_record.h"
 #include "avi.h"
 #include "camera_perf.h"
+#include "camera_exposure.h"
 #include "camera_test.h"
 #include "green_detector.h"
 #include "jpeg_enc.h"
@@ -20,7 +21,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DART_RECORDING_VERSION "2.1.6-latest"
+#define DART_RECORDING_VERSION "2.2.0-rgb-3ms"
 
 extern int board_clock_start(void);
 extern int board_storage_start(void);
@@ -38,7 +39,7 @@ static dart_parser parser;
 typedef struct { uint32_t rx_us; dart_imu imu; } imu_entry;
 static imu_entry imu_queue[1024] __attribute__((section(".camera_d2"), aligned(32)));
 static imu_entry pre_trigger[DART_AUTO_PRE_SAMPLES] __attribute__((section(".camera_d2"), aligned(32)));
-/* JPEG输出59392字节，与相机缓冲和掩膜共用AXI；该段加SD缓冲后已满。
+/* JPEG输出59392字节，与相机缓冲和单张绿色掩膜共用AXI。
  * 硬件编码的条带重排缓冲放DTCM，不增加AXI或D2的占用。 */
 static uint8_t jpeg_out[DART_JPEG_OUT_MAX] __attribute__((section(".camera_buffer"), aligned(32)));
 static volatile unsigned imu_head, imu_tail, accept_imu;
@@ -58,7 +59,7 @@ static uint32_t csv_rows;
 static uint32_t det_evals, det_hits, enc_fails;
 /* 分阶段耗时（微秒累计）：定位板上 200ms/帧瓶颈，INFO.TXT 与 status 可见。 */
 static uint32_t t_detect_us, t_annotate_us, t_encode_us, t_write_us, t_frame_us;
-/* 耗时明细放DTCM的普通.bss，不占已满的相机AXI SRAM；只在主循环访问。 */
+/* 耗时明细放DTCM的普通.bss，不占相机AXI SRAM；只在主循环访问。 */
 static record_profile frame_profile;
 static uint32_t profile_export_us, profile_export_failed;
 static char directory[16], video_path[40], log_path[40], csv_path[40], info_path[40], det_path[40], profile_path[40];
@@ -434,6 +435,13 @@ static void write_profile_info(FIL *info)
             (unsigned long)frame_profile.detection_max[i]);
         if (n < 0 || (unsigned)n >= sizeof(text) || write_exact(info, text, (UINT)n) != FR_OK) failed = 1;
     }
+    n = snprintf(text, sizeof(text),
+        "曝光：固定目标=%lu us；整数行=%lu；配置时长=%lu ns；寄存器回读通过=%lu；增益自动。\r\n"
+        "RGB识别：G>=%u；2G-R-B>=%u；绿色连通域像素数=%u..%u；主目标取最大面积。\r\n",
+        (unsigned long)DART_CAMERA_EXPOSURE_US,(unsigned long)DART_CAMERA_EXPOSURE_LINES,
+        (unsigned long)DART_CAMERA_EXPOSURE_NS,(unsigned long)camera_exposure_verified,
+        DART_DET_G_MIN,2*DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX);
+    if (n < 0 || (unsigned)n >= sizeof(text) || write_exact(info,text,(UINT)n) != FR_OK) failed = 1;
 }
 static void write_info(void)
 {
@@ -628,6 +636,16 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
         step = "WRITE DET HDR"; if ((code = write_exact(&detfile, det_header, (UINT)strlen(det_header))) != FR_OK) goto fail;
     }
     log_event("VERSION " DART_RECORDING_VERSION);
+    if (camera_mode) {
+        char config[72];
+        snprintf(config,sizeof(config),"EXP us=%lu lines=%lu raw=%lu verify=%lu gain=auto",
+            (unsigned long)DART_CAMERA_EXPOSURE_US,(unsigned long)DART_CAMERA_EXPOSURE_LINES,
+            (unsigned long)DART_CAMERA_EXPOSURE_RAW,(unsigned long)camera_exposure_verified);
+        log_event(config);
+        snprintf(config,sizeof(config),"RGB g=%u excess=%u area=%u..%u largest",
+            DART_DET_G_MIN,DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX);
+        log_event(config);
+    }
     if (camera_mode) log_event("JPEG " JPEG_ENCODER_BACKEND " quality=75 subsampling=420");
     log_event("gyro=1000Hz/2000dps accel=1600Hz/24g image=320x240/YUV422 fps=measured");
     log_event("CONFIG threshold_mg=2000 hold_us=20000 duration_us=10000000 pre=200");

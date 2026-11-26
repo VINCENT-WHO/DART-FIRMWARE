@@ -40,9 +40,9 @@ int main(void)
 
     char text[RECORD_PROFILE_CSV_LINE_CAPACITY];
     assert(record_profile_csv_line(text, sizeof(text), 1, &p->rows[0]) > 0);
-    assert(!strcmp(text, "1,0,1234,25,10,20,30,40,100,125,8,0,400,1,2,3,4,5,6,7,8,9,10\r\n"));
+    assert(!strcmp(text, "1,0,1234,25,10,20,30,40,100,125,8,0,400,1,2,3,4,5,6,7\r\n"));
     assert(record_profile_csv_line(text, sizeof(text), 2, &p->rows[1]) > 0);
-    assert(!strcmp(text, "2,,1234,25,10,20,90,0,120,145,8,2,600,1,2,3,4,5,6,7,8,9,10\r\n"));
+    assert(!strcmp(text, "2,,1234,25,10,20,90,0,120,145,8,2,600,1,2,3,4,5,6,7\r\n"));
     unsigned columns = 1;
     for (const char *c = record_profile_csv_header; *c; ++c) if (*c == ',') columns++;
     assert(columns == 13 + DET_TIME_COUNT && !memcmp(record_profile_csv_header, "\xEF\xBB\xBF", 3));
@@ -69,10 +69,10 @@ int main(void)
     record_profile_reset(p);
     row.total_us = UINT32_MAX;
     row.stage_us[2] = UINT32_MAX;
-    row.detection.stage_us[DET_TIME_SUPPORT] = UINT32_MAX;
+    row.detection.stage_us[DET_TIME_AREA] = UINT32_MAX;
     record_profile_append(p, &row); record_profile_append(p, &row);
     assert(p->total_sum == 2ull * UINT32_MAX && p->stage_sum[2] == 2ull * UINT32_MAX);
-    assert(p->detection_sum[DET_TIME_SUPPORT] == 2ull * UINT32_MAX);
+    assert(p->detection_sum[DET_TIME_AREA] == 2ull * UINT32_MAX);
     record_profile_reset(p);
     assert(p->attempts == 0 && p->stored == 0 && p->total_sum == 0 && p->append_cycle_max == 0);
     for (unsigned i = 0; i < DET_TIME_COUNT; ++i)

@@ -296,7 +296,8 @@ int camera_video_frame(const unsigned char **data,unsigned *bytes) {
 }
 
 /* Shared electrical setup; perf owns workspace only while the old capture is idle. */
-int camera_perf_base(void) {probe(1);if(!probed)return -1;init(0);return initialized?0:-1;}
+/* 正式录像固定24MHz，避免此前CAM CLK12调试命令改变3ms曝光换算。 */
+int camera_perf_base(void) {clock_mhz=24;probe(1);if(!probed)return -1;init(0);return initialized?0:-1;}
 int camera_read_register(unsigned r) {return rd((uint16_t)r);}
 int camera_write_register(unsigned r,unsigned v) {return wr((uint16_t)r,(uint8_t)v);}
 void camera_perf_bus(void) {dcmi_init(6);HAL_NVIC_DisableIRQ(DMA2_Stream1_IRQn);HAL_NVIC_DisableIRQ(DCMI_IRQn);(void)HAL_DMA_DeInit(&dma);}
