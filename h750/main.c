@@ -21,7 +21,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DART_RECORDING_VERSION "2.2.1-rgb-roi3ms"
+#define DART_RECORDING_VERSION "2.2.2-rgb-roi3ms"
 
 extern int board_clock_start(void);
 extern int board_storage_start(void);
@@ -438,10 +438,11 @@ static void write_profile_info(FIL *info)
     n = snprintf(text, sizeof(text),
         "曝光：固定目标=%lu us；整数行=%lu；配置时长=%lu ns；寄存器回读通过=%lu；增益自动。\r\n"
         "RGB识别：G>=%u；2G-R-B>=%u；绿色连通域像素数=%u..%u；搜索域内选最大区域。\r\n"
-        "ROI：上帧外接矩形中心不变，宽高1.5倍向外取整并裁到图像边界；丢失/内部触边当帧回退全图。\r\n",
+        "ROI：上帧外接矩形中心不变，宽高1.5倍向外取整，每侧至少扩展%u像素后裁到图像边界；丢失/内部触边当帧回退全图。\r\n",
         (unsigned long)DART_CAMERA_EXPOSURE_US,(unsigned long)DART_CAMERA_EXPOSURE_LINES,
         (unsigned long)DART_CAMERA_EXPOSURE_NS,(unsigned long)camera_exposure_verified,
-        DART_DET_G_MIN,2*DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX);
+        DART_DET_G_MIN,2*DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX,
+        (unsigned)DART_DET_ROI_MIN_PADDING);
     if (n < 0 || (unsigned)n >= sizeof(text) || write_exact(info,text,(UINT)n) != FR_OK) failed = 1;
 }
 static void write_info(void)
@@ -644,8 +645,9 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
             (unsigned long)DART_CAMERA_EXPOSURE_US,(unsigned long)DART_CAMERA_EXPOSURE_LINES,
             (unsigned long)DART_CAMERA_EXPOSURE_RAW,(unsigned long)camera_exposure_verified);
         log_event(config);
-        snprintf(config,sizeof(config),"RGB g=%u excess=%u area=%u..%u largest roi=1.5",
-            DART_DET_G_MIN,DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX);
+        snprintf(config,sizeof(config),"RGB g=%u excess=%u area=%u..%u largest roi=1.5 pad=%u",
+            DART_DET_G_MIN,DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX,
+            (unsigned)DART_DET_ROI_MIN_PADDING);
         log_event(config);
     }
     if (camera_mode) log_event("JPEG " JPEG_ENCODER_BACKEND " quality=75 subsampling=420");

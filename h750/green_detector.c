@@ -1,6 +1,6 @@
 /* RGB绿灯识别：YUYV转RGB -> G阈值/去白 -> 3x3滑动中值 ->
  * 8连通域像素面积筛选 -> 选择最大区域，输出绿色像素质心。
- * 检出后用1.5倍包围盒跨帧搜索，丢失/截断时回退全图。
+ * 检出后用1.5倍包围盒（每侧至少扩10像素）跨帧搜索，丢失/截断时回退全图。
  * 输入只读，不依赖HAL；矩形/文字由green_annotate另行绘制。 */
 #include "green_detector.h"
 #include <string.h>
@@ -35,9 +35,11 @@ static int region_is_full(const detection_region *r)
 }
 static detection_region expand_box(const dart_detection *d)
 {
-    /* 各边向外扩原尺寸的1/4，整数边界向外取整，中心不偏移。
+    /* 各边向外扩原尺寸的1/4，向上取整且至少10像素，中心不偏移。
      * 先扩再裁，触边时不把另一侧向内平移。 */
     int px = (d->box_w + 3) / 4, py = (d->box_h + 3) / 4;
+    if (px < DART_DET_ROI_MIN_PADDING) px = DART_DET_ROI_MIN_PADDING;
+    if (py < DART_DET_ROI_MIN_PADDING) py = DART_DET_ROI_MIN_PADDING;
     detection_region r = {d->box_x - px, d->box_y - py,
         d->box_x + d->box_w + px, d->box_y + d->box_h + py};
     if (r.x0 < 0) r.x0 = 0; if (r.y0 < 0) r.y0 = 0;

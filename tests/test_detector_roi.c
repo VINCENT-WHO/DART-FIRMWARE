@@ -1,4 +1,4 @@
-/* 生产C源直接编入：验证ROI像素等价、范围限制、1.5x取整/裁边及跨帧状态。
+/* 生产C源直接编入：验证ROI像素等价、范围限制、1.5x/每侧10px下界及跨帧状态。
  * 合成输入，不使用旧曝光录像，不把主机检查当板端加速测量。 */
 #include "../h750/green_detector.c"
 #include <assert.h>
@@ -100,39 +100,77 @@ static void verify_sequence(void)
     assert(t.search_x == 0 && t.search_w == W && t.search_h == H);
     blank();green(82,82,10,10);green(200,120,20,20);
     d = run(DET_SEARCH_ROI,1,&t);
-    assert(t.search_x == 77 && t.search_y == 77 && t.search_w == 16 && t.search_h == 16);
+    assert(t.search_x == 70 && t.search_y == 70 && t.search_w == 30 && t.search_h == 30);
     assert(d.box_x == 82 && d.box_y == 82 && d.area_q8 == 96*256); /* 框外更大目标不抢占 */
     blank();green(240,180,10,10); /* 快速移动到ROI外：当帧重新找到。 */
     d = run(DET_SEARCH_FALLBACK,1,&t);assert(d.box_x == 240 && d.box_y == 180);
     blank();d = run(DET_SEARCH_FALLBACK,0,&t);assert(!d.box_w && !d.center_x_q16);
     blank();run(DET_SEARCH_FULL,0,&t);
     green(80,80,10,10);run(DET_SEARCH_FULL,1,&t);
-    blank();green(88,80,10,10); /* 局部可通过面积但被右边缘截断，必须取完整结果。 */
-    d = run(DET_SEARCH_FALLBACK,1,&t);assert(d.box_x == 88 && d.box_w == 10 && d.area_q8 == 96*256);
+    blank();green(94,80,10,10); /* 局部可通过面积但被右边缘截断，必须取完整结果。 */
+    d = run(DET_SEARCH_FALLBACK,1,&t);assert(d.box_x == 94 && d.box_w == 10 && d.area_q8 == 96*256);
     det_reset_tracking();blank();green(0,0,10,10);run(DET_SEARCH_FULL,1,&t);
-    d = run(DET_SEARCH_ROI,1,&t);assert(t.search_x == 0 && t.search_y == 0 && t.search_w == 13 && t.search_h == 13);
+    d = run(DET_SEARCH_ROI,1,&t);assert(t.search_x == 0 && t.search_y == 0 && t.search_w == 20 && t.search_h == 20);
     assert(d.box_x == 0 && d.box_y == 0); /* 物理图像边缘无需回退 */
     det_reset_tracking();blank();green(W-10,H-10,10,10);run(DET_SEARCH_FULL,1,&t);
-    d = run(DET_SEARCH_ROI,1,&t);assert(t.search_x == W-13 && t.search_y == H-13 && t.search_w == 13 && t.search_h == 13);
+    d = run(DET_SEARCH_ROI,1,&t);assert(t.search_x == W-20 && t.search_y == H-20 && t.search_w == 20 && t.search_h == 20);
     det_reset_tracking();blank();green(40,70,10,10);run(DET_SEARCH_FULL,1,&t);
     detection_region saved = next_region;
     assert(green_detect_profiled(NULL,&d,&t,now_us) == -1 && !memcmp(&saved,&next_region,sizeof(saved)));
     det_reset_tracking();blank();green(200,100,10,10);d = run(DET_SEARCH_FULL,1,&t);assert(d.box_x == 200);
 }
+static void verify_small_target_motion(void)
+{
+    /* 同样8像素位移原来超出3像素扩展，新下界应让8个方向均保持局部识别。 */
+    const int sizes[][2] = {{4,11}, {10,10}};
+    for (unsigned s = 0; s < sizeof(sizes)/sizeof(sizes[0]); ++s)
+        for (int dy = -8; dy <= 8; dy += 8) for (int dx = -8; dx <= 8; dx += 8) {
+            if (!dx && !dy) continue;
+            dart_detection_timing t;
+            det_reset_tracking(); blank(); green(80,80,sizes[s][0],sizes[s][1]);
+            dart_detection before = run(DET_SEARCH_FULL,1,&t);
+            blank(); green(80+dx,80+dy,sizes[s][0],sizes[s][1]);
+            dart_detection after = run(DET_SEARCH_ROI,1,&t);
+            assert(t.search_x == 70 && t.search_y == 70);
+            assert(t.search_w == sizes[s][0]+20 && t.search_h == sizes[s][1]+20);
+            assert(after.box_x == 80+dx && after.box_y == 80+dy && after.area_q8 == before.area_q8);
+        }
+}
 static void verify_geometry(void)
 {
-    for (int w = 1; w <= W; ++w) for (int h = 1; h <= H; ++h) {
-        dart_detection d = {0};d.box_x=(W-w)/2;d.box_y=(H-h)/2;d.box_w=w;d.box_h=h;
+    for (int w = 1; w <= W; ++w) for (int h = 1; h <= H; ++h) for (int pos = 0; pos < 5; ++pos) {
+        dart_detection d = {0}; d.box_w=w;d.box_h=h;
+        /* 中心及四角穷举，单独验证各方向在有空间时至少10像素。 */
+        d.box_x = pos == 0 ? (W-w)/2 : (pos & 1 ? 0 : W-w);
+        d.box_y = pos == 0 ? (H-h)/2 : (pos <= 2 ? 0 : H-h);
         detection_region r=expand_box(&d);
         assert(r.x0>=0 && r.y0>=0 && r.x1<=W && r.y1<=H);
         assert(r.x0<=d.box_x && r.y0<=d.box_y && r.x1>=d.box_x+w && r.y1>=d.box_y+h);
-        if (r.x0>0 && r.x1<W) assert(r.x0+r.x1==2*d.box_x+w && 2*(r.x1-r.x0)>=3*w && 2*(r.x1-r.x0)<=3*w+3);
-        if (r.y0>0 && r.y1<H) assert(r.y0+r.y1==2*d.box_y+h && 2*(r.y1-r.y0)>=3*h && 2*(r.y1-r.y0)<=3*h+3);
+        assert(r.x0 == 0 || d.box_x-r.x0 >= 10);
+        assert(r.y0 == 0 || d.box_y-r.y0 >= 10);
+        assert(r.x1 == W || r.x1-(d.box_x+w) >= 10);
+        assert(r.y1 == H || r.y1-(d.box_y+h) >= 10);
+        if (w <= 40) {
+            assert(d.box_x-r.x0 == (d.box_x < 10 ? d.box_x : 10));
+            assert(r.x1-(d.box_x+w) == (W-d.box_x-w < 10 ? W-d.box_x-w : 10));
+        }
+        if (h <= 40) {
+            assert(d.box_y-r.y0 == (d.box_y < 10 ? d.box_y : 10));
+            assert(r.y1-(d.box_y+h) == (H-d.box_y-h < 10 ? H-d.box_y-h : 10));
+        }
+        if (r.x0>0 && r.x1<W) {
+            assert(r.x0+r.x1==2*d.box_x+w);
+            if (w > 40) assert(2*(r.x1-r.x0)>=3*w && 2*(r.x1-r.x0)<=3*w+3);
+        }
+        if (r.y0>0 && r.y1<H) {
+            assert(r.y0+r.y1==2*d.box_y+h);
+            if (h > 40) assert(2*(r.y1-r.y0)>=3*h && 2*(r.y1-r.y0)<=3*h+3);
+        }
     }
 }
 int main(void)
 {
-    verify_geometry(); verify_pixels(); verify_sequence();
-    puts("PASS: ROI 1.5x/clipping/halo median/odd YUYV bounds/motion/distractors/loss/reacquire/reset/timing");
+    verify_geometry(); verify_pixels(); verify_sequence(); verify_small_target_motion();
+    puts("PASS: ROI 1.5x/minimum 10px/clipping/small-target 8px motion/halo median/odd YUYV bounds/reacquire/reset/timing");
     return 0;
 }

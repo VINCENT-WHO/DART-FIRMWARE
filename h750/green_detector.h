@@ -12,6 +12,8 @@
 /* 面积为滤波后8连通域的绿色像素数，不含白色孔洞。 */
 #define DART_DET_AREA_MIN 40u
 #define DART_DET_AREA_MAX (DART_DET_PIXELS * 8u / 100u)
+/* ROI每侧至少扩展10像素；更大目标仍按原尺寸1/4扩展，最后裁到图像边界。 */
+#define DART_DET_ROI_MIN_PADDING 10
 
 /* 一次检测的结果；坐标为像素单位，原点在图像左上，X 向右、Y 向下。
  * 质心使用16位小数的定点信息（Q16），统计绿色连通域内像素。 */
@@ -31,7 +33,8 @@ typedef struct {
 /* 在 YUV422 帧上执行完整检测。返回 0 成功，非 0 参数错误。 */
 int green_detect(const uint8_t *yuv422, dart_detection *out);
 /* 单路跨帧ROI：新会话/换输入源时重置，下一帧全图搜索。
- * 检出后按包围盒中心放大1.5倍；局部丢失或触碰内部边界时当帧回退全图。 */
+ * 检出后按包围盒中心放大1.5倍且每侧至少扩10像素；越界直接裁边。
+ * 局部丢失或触碰内部边界时当帧回退全图。 */
 void det_reset_tracking(void);
 
 /* 分阶段墙钟耗时；同一帧多个候选在对应阶段累加，未执行阶段为0。
