@@ -15,13 +15,14 @@ enum { PROFILE_OK, PROFILE_PROCESS_ERROR, PROFILE_ENCODE_ERROR, PROFILE_WRITE_ER
 typedef struct {
     uint32_t capture_us;             /* 相机帧完成时间，相对触发，非曝光开始 */
     uint32_t queue_us;               /* 帧完成至主循环开始处理的等待时间 */
-    uint32_t stage_us[RECORD_PROFILE_STAGES]; /* 预处理、绘图、编码、保存 */
+    uint32_t stage_us[RECORD_PROFILE_STAGES]; /* 预处理、绘图、编码、保存提交（非落盘） */
     uint32_t total_us;               /* 单帧处理墙钟时间，含中断抢占 */
     uint32_t avi_index;              /* 未成功保存为UINT32_MAX */
     uint32_t camera_drops;           /* 截至该帧处理结束的相机丢帧累计 */
     uint32_t result;
     uint32_t append_cycles;          /* 仅测RAM追加及汇总统计的CPU周期 */
     dart_detection_timing detection;
+    uint32_t jpeg_pack_us, jpeg_poll_us; /* 本帧重排/轮询细分；未编码时为0 */
 } record_profile_row;
 
 typedef struct {
@@ -40,7 +41,7 @@ void record_profile_note_cycles(record_profile *profile, uint32_t slot, uint32_t
 /* 仅在采集停止后调用文本格式化；头部为UTF-8 BOM，单位在列名中。 */
 extern const char record_profile_csv_header[];
 extern const char *const record_profile_detection_names[DET_TIME_COUNT];
-/* 25列最宽十进制数及分隔符、CRLF、NUL的上界。 */
+/* 27列最宽十进制数及分隔符、CRLF、NUL的上界（含4列uint16）。 */
 #define RECORD_PROFILE_CSV_LINE_CAPACITY 288u
 int record_profile_csv_line(char *buffer, size_t capacity, uint32_t attempt,
                             const record_profile_row *row);

@@ -21,7 +21,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DART_RECORDING_VERSION "2.2.2-rgb-roi3ms"
+#define DART_RECORDING_VERSION "2.3.0-writeback"
 
 extern int board_clock_start(void);
 extern int board_storage_start(void);
@@ -64,6 +64,10 @@ static record_profile frame_profile;
 static uint32_t profile_export_us, profile_export_failed;
 static char directory[16], video_path[40], log_path[40], csv_path[40], info_path[40], det_path[40], profile_path[40];
 #define MAX_FRAMES 600u
+/* 每帧16字节，采集中只追加RAM；与AVI成功提交帧号一一对应。 */
+typedef struct { uint32_t time_us; int32_t cx_q16,cy_q16; uint16_t radius; uint8_t found,pad; } detection_row;
+_Static_assert(sizeof(detection_row)==16,"Detection rows must fit the bounded DTCM budget");
+static detection_row detection_rows[MAX_FRAMES];
 /* 与主机验证管线（tests/onboard_pipeline.c 默认值）一致的编码质量。 */
 #define DART_JPEG_QUALITY 75
 static uint32_t offsets[MAX_FRAMES], sizes[MAX_FRAMES];
@@ -256,14 +260,15 @@ static void save_frame(const uint8_t *bytes, uint32_t n, uint32_t time)
     uint8_t info[12]; dart_put32(info, saved_frames); dart_put32(info + 4, n); dart_put32(info + 8, camera_frames);
     log_packet(17, time, info, 12); saved_frames++; movi_bytes += 8 + n + (n & 1);
 }
-/* 板内完整识别管线：检测 -> 标注 -> JPEG 编码 -> AVI 帧落盘 + DETECT.CSV 行。
+/* 板内管线：检测 -> 标注 -> JPEG -> 释放原帧 -> AVI写回缓存 + 检测结果RAM行。
  * bytes 指向相机 slot 里的 YUV422 帧（slot 已被 camera_take 持有，DMA 不会再写）；
  * 外接矩形与坐标文本直接画在该缓冲内，随后整帧编码成 Baseline JPEG。
  * 标注在检测之后进行，因此绘图不会影响检测（阈值判定只看原始帧）。 */
-static void process_frame(const uint8_t *bytes, uint32_t time)
+static void process_frame(const uint8_t *bytes, uint32_t time, unsigned slot)
 {
-    if ((int32_t)(time - start_us) < 0 || (int32_t)(time - end_us) >= 0) return;
-    if (saved_frames >= MAX_FRAMES) { failed = 1; return; }
+    if ((int32_t)(time - start_us) < 0 || (int32_t)(time - end_us) >= 0) { camera_release(slot);return; }
+    if (saved_frames >= MAX_FRAMES) { failed = 1;camera_release(slot);return; }
+    unsigned released=0;
     det_evals++;
     uint32_t t0 = board_micros(), t1, t2, t3, t4;
     record_profile_row timing = {0};
@@ -286,23 +291,25 @@ static void process_frame(const uint8_t *bytes, uint32_t time)
     result = jpeg_encode_yuv422(bytes, DART_JPEG_QUALITY, jpeg_out, &jpeg_size);
     t3 = board_micros();
     timing.stage_us[2] = t3 - t2;
+    timing.jpeg_pack_us = jpeg_hw_last_pack_us;
+    timing.jpeg_poll_us = jpeg_hw_last_poll_us;
+    /* JPEG已独立存储，后续只读取检测结果；即使写回队列满也不再占原始帧槽。 */
+    camera_release(slot);released=1;
     if (result) { enc_fails++; timing.result = PROFILE_ENCODE_ERROR; t4 = t3; goto profile_complete; }
     save_frame(jpeg_out, jpeg_size, time);
-    if (det_open) {
-        char line[96];
-        int32_t cx = det.found ? det.center_x_q16 : 0, cy = det.found ? det.center_y_q16 : 0;
-        int n = snprintf(line, sizeof(line), "%u,%ld,%u,%ld.%02lu,%ld.%02lu,%d\r\n",
-                         frame_index, (long)(time - start_us), det.found ? 1u : 0u,
-                         (long)(cx >> 16), (unsigned long)(((uint32_t)cx & 0xFFFFu) * 100u >> 16),
-                         (long)(cy >> 16), (unsigned long)(((uint32_t)cy & 0xFFFFu) * 100u >> 16),
-                         det.found ? det.radius : 0);
-        if (n < 0 || (unsigned)n >= sizeof(line) || write_exact(&detfile, line, (UINT)n) != FR_OK) failed = 1;
+    if (saved_frames == frame_index+1) {
+        detection_row *row=&detection_rows[frame_index];
+        row->time_us=time-start_us;row->found=det.found ? 1u : 0u;
+        row->cx_q16=det.found ? det.center_x_q16 : 0;
+        row->cy_q16=det.found ? det.center_y_q16 : 0;
+        row->radius=det.found ? (uint16_t)det.radius : 0;
     }
     t4 = board_micros();
     timing.stage_us[3] = t4 - t3;
     timing.result = failed || saved_frames != frame_index + 1 ? PROFILE_WRITE_ERROR : PROFILE_OK;
     if (saved_frames == frame_index + 1) timing.avi_index = frame_index;
 profile_complete:
+    if(!released)camera_release(slot);
     /* 错误帧也计时；采集期间不新增printf/f_write/串口输出。 */
     timing.total_us = t4 - t0;
     timing.camera_drops = camera_drops - start_camera_drops;
@@ -310,8 +317,8 @@ profile_complete:
     t_encode_us += timing.stage_us[2]; t_write_us += timing.stage_us[3];
     t_frame_us += timing.total_us;
     uint32_t cycle_start = DWT->CYCCNT;
-    uint32_t slot = record_profile_append(&frame_profile, &timing);
-    record_profile_note_cycles(&frame_profile, slot, DWT->CYCCNT - cycle_start);
+    uint32_t profile_slot = record_profile_append(&frame_profile, &timing);
+    record_profile_note_cycles(&frame_profile, profile_slot, DWT->CYCCNT - cycle_start);
 }
 static void stop_stream(void)
 {
@@ -322,8 +329,11 @@ static void stop_stream(void)
 }
 static void release_card(void)
 {
+    /* 未成功排空（含锁存错误）不把卡交给USB，避免读到未完成的文件系统。 */
+    int storage_error=fs_storage_end();
+    if(storage_error)failed=1;
     if (mounted) { f_mount(NULL, "0:", 0); mounted = 0; }
-    fs_disk_write_enabled = 0; usb_tf_set_busy(0);
+    fs_disk_write_enabled = 0; if(!storage_error)usb_tf_set_busy(0);
 }
 static void cancel_preparation(void)
 {
@@ -366,6 +376,25 @@ static int export_csv(void)
     if (f_close(&input) != FR_OK || decode.errors || decode.count || csv_rows != saved_imu) error = 1;
     return error ? -1 : 0;
 }
+static int export_detections(void)
+{
+    unsigned used=0;
+    for(uint32_t i=0;i<saved_frames;++i) {
+        const detection_row *r=&detection_rows[i];char line[96];
+        int32_t cx=r->cx_q16,cy=r->cy_q16;
+        int n=snprintf(line,sizeof(line),"%lu,%lu,%u,%ld.%02lu,%ld.%02lu,%u\r\n",
+            (unsigned long)i,(unsigned long)r->time_us,(unsigned)r->found,
+            (long)(cx>>16),(unsigned long)(((uint32_t)cx&0xffffu)*100u>>16),
+            (long)(cy>>16),(unsigned long)(((uint32_t)cy&0xffffu)*100u>>16),(unsigned)r->radius);
+        if(n<0 || (unsigned)n>=sizeof(line))return -1;
+        if(used+(unsigned)n>sizeof(log_buffer)) {
+            if(write_exact(&detfile,log_buffer,used)!=FR_OK)return -1;
+            used=0;
+        }
+        memcpy(log_buffer+used,line,(unsigned)n);used+=(unsigned)n;
+    }
+    return used && write_exact(&detfile,log_buffer,used)!=FR_OK ? -1 : 0;
+}
 static int export_profile(void)
 {
     /* 相机、IMU及原始文件均已停止/关闭；复用日志缓冲，不在采集期写耗时CSV。 */
@@ -404,7 +433,7 @@ static void write_profile_info(FIL *info)
         "图像处理 平均=%lu us；最大=%lu us。\r\n"
         "绘图 平均=%lu us；最大=%lu us。\r\n"
         "JPEG编码 平均=%lu us；最大=%lu us。\r\n"
-        "保存 平均=%lu us；最大=%lu us（AVI、原有DETECT文本、可能的DLG缓冲刷写）。\r\n"
+        "保存提交 平均=%lu us；最大=%lu us（AVI/DLG入队与检测结果RAM缓存；满队列时等待）。\r\n"
         "处理总计 平均=%lu us；最大=%lu us（不含排队）。\r\n"
         "上述为墙钟耗时，包含中断抢占；帧完成时间不是曝光时刻。\r\n"
         "RAM追加平均=%lu cycles；最大=%lu cycles；CPU=%lu Hz。\r\n"
@@ -412,7 +441,7 @@ static void write_profile_info(FIL *info)
         "耗时CSV导出=%lu us；导出失败=%lu；仅在采集结束后写入。\r\n"
         "JPEG后端：" JPEG_ENCODER_BACKEND "；质量=%u；4:2:0。\r\n"
         "JPEG累计重排=%lu us；轮询=%lu us（含FIFO搬运/中断）；最后错误=%lu；HAL错误=0x%08lX。\r\n"
-        "TIMING中编码时间包含重排与硬件处理；未启用JPEG MDMA。\r\n",
+        "TIMING中编码时间包含重排与硬件处理；末两列为逐帧重排/轮询；输出直写最终缓冲，未启用MDMA。\r\n",
         profile_path, (unsigned long)count, (unsigned long)frame_profile.stored,
         RECORD_PROFILE_CAPACITY, (unsigned long)frame_profile.dropped_rows,
         (unsigned long)frame_profile.result_count[0], (unsigned long)frame_profile.result_count[1],
@@ -444,6 +473,21 @@ static void write_profile_info(FIL *info)
         DART_DET_G_MIN,2*DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX,
         (unsigned)DART_DET_ROI_MIN_PADDING);
     if (n < 0 || (unsigned)n >= sizeof(text) || write_exact(info,text,(UINT)n) != FR_OK) failed = 1;
+    const fs_writeback_stats *s=fs_storage_stats();
+    n=snprintf(text,sizeof(text),
+        "\r\nSD写回缓存：容量=%u B；峰值=%lu B；待写=%lu扇区；提交=%lu扇区；卡就绪后完成=%lu扇区。\r\n"
+        "写回DMA批次=%lu；满缓存等待=%lu次；累计=%lu ms；最长=%lu us；策略=等待腾位，不丢数据。\r\n"
+        "写回DMA累计=%lu ms；单次最大=%lu us；DMA完成至观察到卡就绪累计=%lu ms；单次最大=%lu us。\r\n"
+        "最大扇区排队至完成=%lu us；最长排空=%lu us；读未命中排空=%lu次；读缓存命中=%lu扇区；错误阶段=%lu。\r\n"
+        "保存提交耗时不等于物理落盘耗时；卡忙计时含主循环调度间隔。关闭前同步/排空成功才报告正常完成。\r\n",
+        FS_WRITEBACK_BYTES,(unsigned long)s->peak_sectors*512u,(unsigned long)s->queued_sectors,
+        (unsigned long)s->enqueued_sectors,(unsigned long)s->completed_sectors,
+        (unsigned long)s->dma_transfers,(unsigned long)s->full_waits,(unsigned long)(s->full_wait_us/1000),
+        (unsigned long)s->full_wait_max_us,(unsigned long)(s->dma_us/1000),(unsigned long)s->dma_max_us,
+        (unsigned long)(s->card_busy_us/1000),(unsigned long)s->card_busy_max_us,
+        (unsigned long)s->queue_latency_max_us,(unsigned long)s->sync_max_us,
+        (unsigned long)s->read_flushes,(unsigned long)s->cache_read_sectors,(unsigned long)s->error_stage);
+    if(n<0 || (unsigned)n>=sizeof(text) || write_exact(info,text,(UINT)n)!=FR_OK)failed=1;
 }
 static void write_info(void)
 {
@@ -495,11 +539,17 @@ static void close_session(void)
     if (camera_mode) {
         const uint8_t *bytes; uint32_t n, time; int slot;
         while ((slot = camera_take(&bytes, &n, &time)) >= 0) {
-            if (!failed) process_frame(bytes, time); camera_release((unsigned)slot);
+            if (!failed) process_frame(bytes, time, (unsigned)slot);
+            else camera_release((unsigned)slot);
         }
         if (!saved_frames) failed = 1;
     }
     state = SAVING; send_led();
+    /* 先把FatFs末尾扇区和DLG RAM缓冲交付，并确认写回全部完成，再补索引。
+     * 后续导出/关文件恢复同步模式，SD故障锁存后不会继续乱序写。 */
+    if(video_open && f_sync(&video)!=FR_OK)failed=1;
+    if(log_open && (flush_log() || f_sync(&logfile)!=FR_OK))failed=1;
+    if(fs_storage_end())failed=1;
     if (video_open && !failed) {
         uint8_t header[224], index[16]; memcpy(index, "idx1", 4); dart_put32(index + 4, saved_frames * 16);
         if (write_exact(&video, index, 8) != FR_OK) failed = 1;
@@ -530,6 +580,7 @@ static void close_session(void)
         csv_open = 0;
     }
     if (det_open) {
+        if (export_detections()) failed=1;
         if (f_truncate(&detfile) != FR_OK) failed = 1;
         if (f_close(&detfile) != FR_OK) failed = 1;
         det_open = 0;
@@ -555,6 +606,10 @@ static void close_session(void)
     reply("SESSION ERR gaps=%lu qdrop=%lu crc=%lu uart=%lu write_ms=%lu",
           (unsigned long)imu_gaps, (unsigned long)(imu_overflows - session_imu_overflows),
           (unsigned long)(parser.errors - session_crc_errors), (unsigned long)(uart_errors - session_uart_errors), (unsigned long)max_write_ms);
+    const fs_writeback_stats *storage=fs_storage_stats();
+    reply("SD CACHE pending=%lu peak=%lu full=%lu error_stage=%lu hal=%lx",
+        (unsigned long)storage->queued_sectors,(unsigned long)storage->peak_sectors,
+        (unsigned long)storage->full_waits,(unsigned long)storage->error_stage,(unsigned long)fs_disk_last_error);
 }
 
 static int select_paths(uint32_t token, unsigned auto_mode)
@@ -631,7 +686,7 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
     step = "RESERVE CSV"; if ((code = f_expand(&csvfile, 4u * 1024u * 1024u, 1)) != FR_OK) goto fail;
     step = "WRITE CSV HDR"; if ((code = write_exact(&csvfile, dart_imu_csv_header, (UINT)strlen(dart_imu_csv_header))) != FR_OK) goto fail;
     if (camera_mode) {
-        /* 机载识别结果：每保存一帧写一行中心坐标，可直接用 Excel 打开。 */
+        /* 机载识别结果：采集期只存RAM，结束后批量写中心坐标CSV。 */
         step = "OPEN DET"; if ((code = f_open(&detfile, det_path, FA_WRITE | FA_CREATE_NEW)) != FR_OK) goto fail;
         det_open = 1;
         step = "RESERVE DET"; if ((code = f_expand(&detfile, 64u * 1024u, 1)) != FR_OK) goto fail;
@@ -653,6 +708,8 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
     if (camera_mode) log_event("JPEG " JPEG_ENCODER_BACKEND " quality=75 subsampling=420");
     log_event("gyro=1000Hz/2000dps accel=1600Hz/24g image=320x240/YUV422 fps=measured");
     log_event("CONFIG threshold_mg=2000 hold_us=20000 duration_us=10000000 pre=200");
+    step="SD WRITEBACK";if((code=fs_storage_begin())!=0)goto fail;
+    log_event("STORAGE writeback=65536 chunk=16384 full=wait detcsv=deferred");
     if (camera_mode) { step = "CAMSTART"; if ((code = camera_start()) != 0) goto fail; camera_running = 1; }
     remote_started = remote_stopped = 0; imu_head = imu_tail = 0;
     last_imu_rx = last_good_frame = prepare_us = board_micros(); accept_imu = 1;
@@ -737,6 +794,7 @@ int main(void)
     reply("BOOT Dart AutoRecord H750 " DART_RECORDING_VERSION " clock=%d storage=%d", clock, storage);
     if (clock || storage) state = ERROR_STATE;
     for (;;) {
+        if ((state==PREPARING || state==ARMED || state==RECORDING) && fs_storage_poll()) failed=1;
         process_replies();
         if (HAL_GetTick() - last_led_sent >= 500) send_led();
         /* 电脑在原生USB端连接时只读卡，避免拿起板子读文件时误触发。 */
@@ -750,8 +808,8 @@ int main(void)
             const uint8_t *bytes; uint32_t n, time; int slot = camera_mode ? camera_take(&bytes, &n, &time) : -1;
             if (slot >= 0) {
                 last_good_frame = board_micros();
-                if (state == RECORDING) process_frame(bytes, time);
-                camera_release((unsigned)slot);
+                if (state == RECORDING && !failed) process_frame(bytes, time, (unsigned)slot);
+                else camera_release((unsigned)slot);
             }
             if (sync_ready && log_open) {
                 uint8_t pair[12]; dart_put32(pair, sync_sent); dart_put32(pair + 4, sync_f1_time); dart_put32(pair + 8, sync_ready_time);

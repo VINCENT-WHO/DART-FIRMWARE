@@ -10,7 +10,8 @@
 #define JPEG_MCU_STRIP_COUNT (JPEG_FRAME_HEIGHT / JPEG_MCU_STRIP_HEIGHT)
 #define JPEG_MCU_STRIP_BYTES (JPEG_FRAME_WIDTH / 16u * 384u)
 
-/* 取一条16行YUYV，重排为硬件4:2:0块序；不改输入，不分配整帧副本。 */
+/* 取一条16行YUYV，以32位字读取融合亮度提取/色度垂直平均。
+ * 重排为硬件4:2:0块序；不改输入，不分配整帧副本，支持非对齐缓冲。 */
 int jpeg_pack_mcu_strip(const uint8_t *yuyv, uint32_t strip,
                          uint8_t *out, uint32_t capacity);
 

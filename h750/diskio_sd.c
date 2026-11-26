@@ -1,4 +1,4 @@
-/* Polling SDMMC bridge for FatFs. No DMA/cache dependency, format, or trim.
+/* FatFs SDMMC桥接：录像期64KiB有界延迟写，其余路径同步DMA。
  * Only an explicit file-test session may enable disk writes.
  * 分区自适应：现代 Windows/读卡器格式化的卡带 MBR/GPT 分区表（FAT 卷
  * 从非 0 扇区开始），而 FatFs 以 FF_MULTI_PARTITION=0 编译，只认 0 扇区
@@ -12,6 +12,7 @@
 #include <string.h>
 
 extern SD_HandleTypeDef hsd1;
+extern uint32_t board_micros(void);
 volatile uint32_t fs_disk_write_enabled;
 volatile uint32_t fs_disk_last_error;
 volatile uint32_t fs_disk_reads, fs_disk_writes;
@@ -20,18 +21,172 @@ static uint32_t disk_ready, disk_sectors;
 /* FAT 卷起始扇区（裸卡=0）与扫描状态；换卡/复位后重新扫描。 */
 static uint32_t part_offset;
 static unsigned part_scanned;
-/* SD 传输缓冲区：SDMMC 内部 DMA 无法访问 DTCM（log_buffer 等 .bss 数据），
- * 所有卡访问都经此缓冲中转。独占 4KB，放在 AXI SRAM 段（与 v2.0 验证过的
- * DMA 目标区一致，SDMMC IDMA 访问 AXI 已被旧固件长期验证）；每次 DMA 最多
- * 8 扇区。不与相机帧槽、检测掩膜、JPEG 缓冲重叠。 */
+/* 同步读写用4KiB中转；写回缓存本身位于AXI，可直接交给SDMMC IDMA。
+ * DTCM中的日志/文件系统缓存必须先复制。D-cache保持关闭。 */
 static uint8_t sd_bounce[4096] __attribute__((section(".camera_buffer"), aligned(32)));
 #define SD_CHUNK 8u
+#define CACHE_SECTORS (FS_WRITEBACK_BYTES / 512u)
+#define ASYNC_CHUNK_SECTORS 32u /* 连续物理LBA合并，最多16KiB；不跨环形边界。 */
+#define STORAGE_TIMEOUT_US 5000000u
+static uint8_t write_cache[FS_WRITEBACK_BYTES] __attribute__((section(".camera_buffer"), aligned(32)));
+static uint32_t cache_lba[CACHE_SECTORS], cache_time[CACHE_SECTORS];
+static unsigned cache_head, cache_count, active_sectors, async_enabled;
+enum { STORE_IDLE, STORE_DMA, STORE_CARD, STORE_ERROR };
+static unsigned store_state;
+static uint32_t phase_start_us, last_card_poll_us;
+static fs_writeback_stats write_stats;
 static volatile unsigned dma_done,dma_failed;
+static volatile uint32_t dma_done_us;
 void SDMMC1_IRQHandler(void) {HAL_SD_IRQHandler(&hsd1);}
-void HAL_SD_TxCpltCallback(SD_HandleTypeDef *h) {(void)h;dma_done=1;}
-void HAL_SD_RxCpltCallback(SD_HandleTypeDef *h) {(void)h;dma_done=1;}
-void HAL_SD_ErrorCallback(SD_HandleTypeDef *h) {(void)h;dma_failed=1;}
+void HAL_SD_TxCpltCallback(SD_HandleTypeDef *h) {if(h==&hsd1){dma_done_us=board_micros();dma_done=1;}}
+void HAL_SD_RxCpltCallback(SD_HandleTypeDef *h) {if(h==&hsd1){dma_done_us=board_micros();dma_done=1;}}
+void HAL_SD_ErrorCallback(SD_HandleTypeDef *h) {if(h==&hsd1)dma_failed=1;}
 static DRESULT wait_transfer(void);
+static int storage_fail(uint32_t stage, uint32_t extra)
+{
+    if (store_state != STORE_ERROR) {
+        fs_disk_last_error = HAL_SD_GetError(&hsd1) | extra;
+        write_stats.error_stage = stage;
+        store_state = STORE_ERROR;
+        (void)HAL_SD_Abort(&hsd1);
+    }
+    return -1; /* 故障锁存，不清除未完成数据，不允许自动重试/乱序继续写。 */
+}
+
+const fs_writeback_stats *fs_storage_stats(void) { return &write_stats; }
+
+int fs_storage_poll(void)
+{
+    if (store_state == STORE_ERROR) return -1;
+    if (!async_enabled) return 0;
+    if (!disk_ready || !fs_disk_write_enabled || usb_tf_host_active()) return storage_fail(1,0);
+    if ((store_state==STORE_DMA || store_state==STORE_CARD) && dma_failed) return storage_fail(2,0);
+    uint32_t now = board_micros();
+    if (store_state == STORE_DMA) {
+        if (!dma_done) {
+            if ((uint32_t)(now-phase_start_us) >= STORAGE_TIMEOUT_US)
+                return storage_fail(3,HAL_SD_ERROR_TIMEOUT);
+            return 0;
+        }
+        uint32_t elapsed = dma_done_us-phase_start_us;
+        write_stats.dma_us += elapsed;
+        if (elapsed > write_stats.dma_max_us) write_stats.dma_max_us = elapsed;
+        phase_start_us = dma_done_us;
+        last_card_poll_us = now-1000u;
+        store_state = STORE_CARD;
+    }
+    if (store_state == STORE_CARD) {
+        if ((uint32_t)(now-phase_start_us) >= STORAGE_TIMEOUT_US)
+            return storage_fail(4,HAL_SD_ERROR_TIMEOUT);
+        if ((uint32_t)(now-last_card_poll_us) < 1000u) return 0;
+        last_card_poll_us = now;
+        HAL_SD_CardStateTypeDef state = HAL_SD_GetCardState(&hsd1);
+        if (state == HAL_SD_CARD_ERROR) return storage_fail(5,0);
+        if (state != HAL_SD_CARD_TRANSFER) return 0;
+        now = board_micros();
+        uint32_t elapsed = now-phase_start_us;
+        write_stats.card_busy_us += elapsed;
+        if (elapsed > write_stats.card_busy_max_us) write_stats.card_busy_max_us = elapsed;
+        /* 卡就绪后才回收，确保DMA源稳定，排队统计包含卡忙与调度间隔。 */
+        for (unsigned i=0;i<active_sectors;++i) {
+            elapsed = now-cache_time[(cache_head+i)%CACHE_SECTORS];
+            if (elapsed > write_stats.queue_latency_max_us) write_stats.queue_latency_max_us=elapsed;
+        }
+        cache_head=(cache_head+active_sectors)%CACHE_SECTORS;
+        cache_count-=active_sectors;
+        write_stats.completed_sectors+=active_sectors;
+        write_stats.queued_sectors=cache_count;
+        active_sectors=0;store_state=STORE_IDLE;
+    }
+    if (store_state == STORE_IDLE && cache_count) {
+        unsigned n=1;
+        while(n<cache_count && n<ASYNC_CHUNK_SECTORS && cache_head+n<CACHE_SECTORS &&
+              cache_lba[cache_head+n]==cache_lba[cache_head]+n) n++;
+        active_sectors=n;dma_done=dma_failed=0;store_state=STORE_DMA;
+        phase_start_us=board_micros();__DMB();
+        if (HAL_SD_WriteBlocks_DMA(&hsd1,write_cache+cache_head*512u,cache_lba[cache_head],n)!=HAL_OK)
+            return storage_fail(6,0);
+        write_stats.dma_transfers++;
+    }
+    return 0;
+}
+
+static int storage_drain(void)
+{
+    uint32_t begin=board_micros();
+    if (fs_storage_poll()) return -1;
+    while(cache_count || store_state==STORE_DMA || store_state==STORE_CARD) {
+        if (fs_storage_poll()) return -1;
+        if ((uint32_t)(board_micros()-begin)>=STORAGE_TIMEOUT_US)
+            return storage_fail(7,HAL_SD_ERROR_TIMEOUT);
+    }
+    uint32_t elapsed=board_micros()-begin;
+    if (elapsed>write_stats.sync_max_us) write_stats.sync_max_us=elapsed;
+    return 0;
+}
+
+int fs_storage_begin(void)
+{
+    if (async_enabled || store_state==STORE_ERROR || !disk_ready ||
+        !fs_disk_write_enabled || usb_tf_host_active() || wait_transfer()!=RES_OK) return -1;
+    cache_head=cache_count=active_sectors=0;store_state=STORE_IDLE;
+    memset(&write_stats,0,sizeof(write_stats));async_enabled=1;
+    return 0;
+}
+int fs_storage_end(void)
+{
+    if (storage_drain()) return -1;
+    async_enabled=0;
+    return 0;
+}
+
+static DRESULT cache_write(const BYTE *data, uint32_t sector, UINT count)
+{
+    if (fs_storage_poll()) return RES_ERROR;
+    while(count) {
+        if (cache_count==CACHE_SECTORS) {
+            uint32_t begin=board_micros();write_stats.full_waits++;
+            do {
+                if (fs_storage_poll()) return RES_ERROR;
+                if ((uint32_t)(board_micros()-begin)>=STORAGE_TIMEOUT_US) {
+                    storage_fail(8,HAL_SD_ERROR_TIMEOUT);return RES_ERROR;
+                }
+            } while(cache_count==CACHE_SECTORS);
+            uint32_t elapsed=board_micros()-begin;
+            write_stats.full_wait_us+=elapsed;
+            if (elapsed>write_stats.full_wait_max_us) write_stats.full_wait_max_us=elapsed;
+        }
+        unsigned tail=(cache_head+cache_count)%CACHE_SECTORS;
+        unsigned n=CACHE_SECTORS-cache_count;
+        if(n>count)n=count;
+        if(n>CACHE_SECTORS-tail)n=CACHE_SECTORS-tail;
+        memcpy(write_cache+tail*512u,data,n*512u);
+        uint32_t now=board_micros();
+        for(unsigned i=0;i<n;++i){cache_lba[tail+i]=sector+i;cache_time[tail+i]=now;}
+        cache_count+=n;write_stats.enqueued_sectors+=n;write_stats.queued_sectors=cache_count;
+        if(cache_count>write_stats.peak_sectors)write_stats.peak_sectors=cache_count;
+        data+=n*512u;sector+=n;count-=n;
+        if(fs_storage_poll())return RES_ERROR;
+    }
+    return RES_OK;
+}
+
+/* 后写同一LBA不能被尚未落盘的旧版本盖住。全请求命中才直接返回；
+ * 部分未命中则先排空全部写，再同步读，保证读写顺序和FatFs一致性。 */
+static int cache_read(BYTE *data,uint32_t sector,UINT count)
+{
+    for(UINT i=0;i<count;++i) {
+        int found=0;
+        for(unsigned j=cache_count;j>0;--j) {
+            unsigned slot=(cache_head+j-1)%CACHE_SECTORS;
+            if(cache_lba[slot]==sector+i){memcpy(data+i*512u,write_cache+slot*512u,512u);found=1;break;}
+        }
+        if(!found)return 0;
+    }
+    write_stats.cache_read_sectors+=count;
+    return 1;
+}
+
 static DRESULT transfer_dma(BYTE *data,LBA_t sector,UINT count,unsigned write) {
     while(count) {
         UINT n=count>SD_CHUNK?SD_CHUNK:count;
@@ -50,11 +205,16 @@ static DRESULT transfer_dma(BYTE *data,LBA_t sector,UINT count,unsigned write) {
 
 void fs_disk_set_ready(uint32_t ready, uint32_t sectors)
 {
+    if(cache_count || store_state==STORE_DMA || store_state==STORE_CARD) {
+        storage_fail(9,0);disk_ready=0;return;
+    }
     disk_ready = ready;
     disk_sectors = sectors;
     part_offset = 0;
     part_scanned = 0;
     fs_disk_write_enabled = 0;
+    async_enabled=0;store_state=STORE_IDLE;cache_head=cache_count=active_sectors=0;
+    memset(&write_stats,0,sizeof(write_stats));
 }
 
 /* 读物理 0 扇区判定卡布局：FAT 引导扇区 -> 裸卡 offset 0；MBR -> 取第一
@@ -121,7 +281,9 @@ DSTATUS disk_initialize(BYTE drive)
 
 static int valid_range(LBA_t sector, UINT count)
 {
-    return count > 0 && sector < disk_sectors && count <= disk_sectors - sector;
+    /* 在加分区偏移之前验证，避免32位LBA加法溢出绕回卡头。 */
+    return part_offset < disk_sectors && count > 0 && sector < disk_sectors-part_offset &&
+        count <= disk_sectors-part_offset-sector;
 }
 
 DRESULT disk_read(BYTE drive, BYTE *buffer, LBA_t sector, UINT count)
@@ -131,7 +293,13 @@ DRESULT disk_read(BYTE drive, BYTE *buffer, LBA_t sector, UINT count)
         scan_partition();
         if (!part_scanned) return RES_ERROR;   /* 物理扇区 0 读失败，下次重扫 */
     }
-    if (!buffer || !valid_range(sector + part_offset, count)) return RES_PARERR;
+    if (!buffer || !valid_range(sector, count)) return RES_PARERR;
+    if (fs_storage_poll()) return RES_ERROR;
+    if(async_enabled && cache_count && cache_read(buffer,(uint32_t)sector+part_offset,count)) {
+        ++fs_disk_reads;fs_disk_read_sectors+=count;return RES_OK;
+    }
+    if(cache_count)write_stats.read_flushes++;
+    if(storage_drain())return RES_ERROR;
     if (wait_transfer() != RES_OK) return RES_ERROR;
     if (transfer_dma(buffer,sector+part_offset,count,0) != RES_OK) {
         fs_disk_last_error = HAL_SD_GetError(&hsd1);
@@ -150,7 +318,13 @@ DRESULT disk_write(BYTE drive, const BYTE *buffer, LBA_t sector, UINT count)
     }
     if (!fs_disk_write_enabled || usb_tf_host_active()) return RES_WRPRT;
     /* 物理扇区 0 是 MBR/GPT 头，文件操作永远不允许写它。 */
-    if (!buffer || !sector || !valid_range(sector + part_offset, count)) return RES_PARERR;
+    if (!buffer || !sector || !valid_range(sector, count)) return RES_PARERR;
+    if (store_state==STORE_ERROR) return RES_ERROR;
+    if(async_enabled) {
+        DRESULT result=cache_write(buffer,(uint32_t)sector+part_offset,count);
+        if(result==RES_OK){++fs_disk_writes;fs_disk_write_sectors+=count;}
+        return result;
+    }
     if (wait_transfer() != RES_OK) return RES_ERROR;
     if (transfer_dma((BYTE *)buffer,sector+part_offset,count,1) != RES_OK) {
         fs_disk_last_error = HAL_SD_GetError(&hsd1);
@@ -164,10 +338,11 @@ DRESULT disk_ioctl(BYTE drive, BYTE command, void *buffer)
 {
     if (disk_status(drive)) return RES_NOTRDY;
     switch (command) {
-    case CTRL_SYNC: return wait_transfer();
+    case CTRL_SYNC: return storage_drain() ? RES_ERROR : wait_transfer();
     case GET_SECTOR_COUNT:
         if (!buffer) return RES_PARERR;
         if (!part_scanned) scan_partition();
+        if (!part_scanned) return RES_ERROR;
         *(LBA_t *)buffer = disk_sectors - part_offset; return RES_OK;
     case GET_SECTOR_SIZE:
         if (!buffer) return RES_PARERR;
@@ -195,7 +370,7 @@ int fs_disk_probe(uint32_t *info)
     info[3] = part_offset;
     info[4] = (uint32_t)HAL_SD_GetCardState(&hsd1);
     info[5] = HAL_SD_GetError(&hsd1);
-    DRESULT r = transfer_dma(sd_bounce, 0, 1, 0);
+    DRESULT r = storage_drain() ? RES_ERROR : transfer_dma(sd_bounce, 0, 1, 0);
     info[6] = (uint32_t)r;
     info[7] = fs_disk_last_error;
     memcpy(&info[8], sd_bounce, 16);

@@ -42,10 +42,12 @@ for swap in (0, 1):
     reconstructed_y = np.empty_like(y)
     reconstructed_cb = np.empty_like(cb)
     reconstructed_cr = np.empty_like(cr)
+    expected_strips = []
     for strip in range(15):
         guarded = np.full(7680 + 64, 0xa5, dtype=np.uint8)
         data = guarded[32:-32]
         assert pack(frame.ctypes.data_as(pointer), strip, data.ctypes.data_as(pointer), data.size) == 0
+        expected_strips.append(data.copy())
         assert np.all(guarded[:32] == 0xa5) and np.all(guarded[-32:] == 0xa5)
         for mx, mcu in enumerate(data.reshape(20, 384)):
             # 独立按空间坐标重建，再逐像素与原图比较，检出块序、转置、UV和舍入错误。
@@ -58,11 +60,33 @@ for swap in (0, 1):
     assert np.array_equal(reconstructed_y, y)
     assert np.array_equal(reconstructed_cb, cb) and np.array_equal(reconstructed_cr, cr)
     assert np.array_equal(frame, original)
+    # 32位优化不得依赖输入/输出地址对齐；完整条带需与独立空间参考一致。
+    for input_offset in range(4):
+        input_guard = np.full(frame.size + 68, 0x53, np.uint8)
+        unaligned = input_guard[32+input_offset:32+input_offset+frame.size]
+        unaligned[:] = frame.reshape(-1)
+        snapshot = input_guard.copy()
+        for output_offset in range(4):
+            for strip in range(15):
+                output_guard = np.full(7680 + 68, 0xa5, np.uint8)
+                data = output_guard[32+output_offset:32+output_offset+7680]
+                assert pack(unaligned.ctypes.data_as(pointer), strip, data.ctypes.data_as(pointer), data.size) == 0
+                assert np.array_equal(data, expected_strips[strip])
+                assert np.all(output_guard[:32+output_offset] == 0xa5)
+                assert np.all(output_guard[32+output_offset+7680:] == 0xa5)
+        assert np.array_equal(input_guard, snapshot)
+    # 相邻行色度0/255：验证双通道求和不串位且平均向下取整为127。
+    edge = np.full_like(frame, 255)
+    edge[::2, :, 1] = 0
+    data = np.empty(7680, np.uint8)
+    assert pack(edge.ctypes.data_as(pointer), 0, data.ctypes.data_as(pointer), data.size) == 0
+    blocks = data.reshape(20,384)
+    assert np.all(blocks[:,:256] == 255) and np.all(blocks[:,256:] == 127)
     rejected = np.full(7680, 0x7b, dtype=np.uint8)
     assert pack(frame.ctypes.data_as(pointer), 15, rejected.ctypes.data_as(pointer), rejected.size) == -1
     assert pack(frame.ctypes.data_as(pointer), 0, rejected.ctypes.data_as(pointer), rejected.size - 1) == -1
     assert np.all(rejected == 0x7b)
-    results[str(swap)] = 'PASS: full-frame Y/Cb/Cr, guards, invalid strip/capacity, immutable input'
+    results[str(swap)] = 'PASS: full-frame Y/Cb/Cr, all 16 alignment pairs, chroma overflow/rounding, guards, immutable input'
 
     class Stream(ctypes.Structure):
         _fields_ = [('data', pointer), ('capacity', ctypes.c_uint32),

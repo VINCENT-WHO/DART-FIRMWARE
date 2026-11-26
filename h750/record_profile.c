@@ -5,10 +5,11 @@
 
 const char record_profile_csv_header[] = "\xEF\xBB\xBF"
     "处理序号,AVI帧号_从0开始,帧完成相对触发_us,排队_us,图像处理_us,绘图_us,"
-    "JPEG编码_us,保存_us,处理总计_us,帧完成至保存_us,相机累计丢帧,结果码,RAM追加_cycles,"
+    "JPEG编码_us,保存提交_us,处理总计_us,帧完成至提交_us,相机累计丢帧,结果码,RAM追加_cycles,"
     "识别初始化_us,RGB绿色二值化_us,绿色中值_us,扫描及收尾_us,"
     "绿色连通域_us,面积筛选_us,最大目标选择_us,"
-    "初始搜索X_px,初始搜索Y_px,初始搜索宽_px,初始搜索高_px,搜索模式_0全图1局部2回退\r\n";
+    "初始搜索X_px,初始搜索Y_px,初始搜索宽_px,初始搜索高_px,搜索模式_0全图1局部2回退,"
+    "JPEG像素重排_us,JPEG轮询及搬运_us\r\n";
 
 const char *const record_profile_detection_names[DET_TIME_COUNT] = {
     "识别初始化", "RGB绿色二值化", "绿色中值", "扫描及收尾",
@@ -63,7 +64,7 @@ int record_profile_csv_line(char *buffer, size_t capacity, uint32_t attempt,
         snprintf(index, sizeof(index), "%lu", (unsigned long)row->avi_index);
     return snprintf(buffer, capacity,
         "%lu,%s,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,"
-        "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u,%u,%u,%lu\r\n",
+        "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u,%u,%u,%lu,%lu,%lu\r\n",
         (unsigned long)attempt, index, (unsigned long)row->capture_us,
         (unsigned long)row->queue_us,
         (unsigned long)row->stage_us[0], (unsigned long)row->stage_us[1],
@@ -80,5 +81,6 @@ int record_profile_csv_line(char *buffer, size_t capacity, uint32_t attempt,
         (unsigned long)row->detection.stage_us[DET_TIME_SCORE],
         (unsigned)row->detection.search_x, (unsigned)row->detection.search_y,
         (unsigned)row->detection.search_w, (unsigned)row->detection.search_h,
-        (unsigned long)row->detection.search_mode);
+        (unsigned long)row->detection.search_mode,
+        (unsigned long)row->jpeg_pack_us, (unsigned long)row->jpeg_poll_us);
 }

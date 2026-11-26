@@ -52,7 +52,7 @@ foreach(chip f103 h750)
         set(cpu cortex-m7)
         set(device STM32H750VBT6)
         set(flash_limit 131072)
-        set(firmware_version "2.2.2-rgb-roi3ms")
+        set(firmware_version "2.3.0-writeback")
     endif()
     target_compile_options(${target} PRIVATE -mcpu=${cpu} -mthumb -mfloat-abi=soft
         -ffunction-sections -fdata-sections -fno-common -gdwarf-4 -Wall -Wextra -Werror

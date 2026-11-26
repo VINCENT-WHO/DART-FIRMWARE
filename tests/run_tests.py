@@ -21,6 +21,19 @@ profile_exe=out/('test_record_profile.exe' if os.name=='nt' else 'test_record_pr
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-I'+str(ROOT/'h750'),
     str(ROOT/'tests/test_record_profile.c'),str(ROOT/'h750/record_profile.c'),'-o',str(profile_exe)],check=True)
 subprocess.run([str(profile_exe)],check=True)
+jpeg_exe=out/('test_jpeg_callbacks.exe' if os.name=='nt' else 'test_jpeg_callbacks')
+subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
+    '-I'+str(ROOT/'tests/jpeg_hal_mock'),'-I'+str(ROOT/'h750'),
+    str(ROOT/'tests/test_jpeg_hw_callbacks.c'),str(ROOT/'h750/jpeg_hw.c'),
+    str(ROOT/'h750/jpeg_mcu.c'),'-o',str(jpeg_exe)],check=True)
+subprocess.run([str(jpeg_exe)],check=True)
+sd_exe=out/('test_sd_writeback.exe' if os.name=='nt' else 'test_sd_writeback')
+subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
+    '-I'+str(ROOT/'tests/sd_hal_mock'),'-I'+str(ROOT/'h750'),'-I'+str(ROOT/'vendor/fatfs/source'),
+    str(ROOT/'tests/test_sd_writeback.c'),str(ROOT/'h750/diskio_sd.c'),
+    str(ROOT/'vendor/fatfs/source/ff.c'),'-o',str(sd_exe)],check=True)
+for case in ['', 'partition', 'fatfs', 'start', 'dma', 'late_dma', 'card', 'dma_timeout', 'card_timeout', 'protect', 'usb']:
+    subprocess.run([str(sd_exe)]+([case] if case else []),check=True)
 detector_exe=out/('test_rgb_detector.exe' if os.name=='nt' else 'test_rgb_detector')
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
     '-Wno-misleading-indentation','-I'+str(ROOT/'h750'),
@@ -75,5 +88,7 @@ try:
 except ImportError:print('Pillow/OpenCV unavailable: skipped generated JPEG/AVI decode');avi_result='NOT RUN'
 report={'result':'PASS','c_randomized_cases':10000,'python_wire_lengths':81,'crc_corruption_and_truncated_tail':'PASS','timestamp_wrap_and_sync':'PASS','imu_gap_detection':'PASS','generated_avi_decode':avi_result,'record_profile_capacity_errors_csv_reset':'PASS','rgb_detection_area_centroid_input_unchanged_and_timing':'PASS','fixed_exposure_register_logic':'PASS','sliding_median_immutable_reference_and_guards':'PASS','hardware':'NOT RUN'}
 report['roi_bounds_halo_motion_reacquire_reset']='PASS'
+report['jpeg_direct_output_callbacks_capacity_and_recovery']='PASS'
+report['sd_writeback_stalls_backpressure_coherence_faults_fatfs_remount']='PASS'
 (out/'validation.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
 print(json.dumps(report,indent=2))
