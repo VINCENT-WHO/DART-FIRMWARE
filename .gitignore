@@ -1,6 +1,7 @@
 # 只跟踪准备分享的源码、构建脚本和识别程序（白名单制，其余默认忽略）
 /*
 !/.gitignore
+!/README.md
 !/CMakeLists.txt
 !/CMakePresets.json
 !/requirements.txt
