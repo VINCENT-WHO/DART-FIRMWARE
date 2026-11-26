@@ -10,7 +10,7 @@
 #define DART_DET_HEIGHT 240
 #define DART_DET_PIXELS ((DART_DET_WIDTH) * (DART_DET_HEIGHT))
 
-/* 阈值：与电脑端 config/rec00038_white_core.yml 完全一致，不改阈值。
+/* 阈值：与电脑端 config/rec00038_white_core.yml 完全一致。
  * HSV 使用 OpenCV 8 位语义：H 0..179，S、V 0..255。 */
 #define DART_DET_HUE_MIN          35
 #define DART_DET_HUE_MAX          95
@@ -21,7 +21,7 @@
 #define DART_DET_MEDIAN_KERNEL    3
 #define DART_DET_SUPPORT_RADIUS   7
 /* 面积与形状判据（area 为轮廓多边形面积，圆度=4*pi*area/perimeter^2）。 */
-#define DART_DET_AREA_MIN         280
+#define DART_DET_AREA_MIN         40       /* REC00031离线验证的小灯芯面积下限 */
 #define DART_DET_AREA_MAX_FRACT   819      /* 0.08*10000，面积上限=像素数*819/10000 */
 #define DART_DET_ASPECT_MAX       12       /* 2.4*5，长短边比 */
 #define DART_DET_CIRC_MIN         175      /* 0.35*500 */

@@ -9,8 +9,8 @@ core_value_min: 252
 core_saturation_max: 35
 median_kernel: 3
 support_radius: 7
-# 针对当前320×240和拍摄距离；保留主灯，拒绝独立的小亮斑。
-area_min: 280.0
+# REC00031小灯芯：面积下限从280降至40；仍需通过形状及绿色邻域筛选。
+area_min: 40.0
 area_max_fraction: 0.08
 aspect_ratio_max: 2.4
 circularity_min: 0.35

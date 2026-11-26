@@ -85,11 +85,26 @@ int main(void)
     for (unsigned i = DET_TIME_FLOOD; i < DET_TIME_COUNT; ++i)
         assert(timing.stage_us[i] == 14);
 
+    /* 小灯芯必须能通过新面积下限，防止回退到原来的280；
+     * 同样大小的白斑缺少绿晕时仍须拒绝，更小灯芯仍须被面积筛掉。 */
+    background(); disk(80, 80, 13, 1); disk(80, 80, 5, 0);
+    timing = check(1);
+    dart_detection small;
+    assert(green_detect(frame, &small) == 0);
+    assert(small.area_q8 >= 40 * 256 && small.area_q8 < 280 * 256);
+    assert(timing.stage_us[DET_TIME_SCORE] == 7);
+    background(); disk(80, 80, 5, 0);
+    timing = check(0);
+    assert(timing.stage_us[DET_TIME_SUPPORT] == 7 && timing.stage_us[DET_TIME_SCORE] == 0);
+    background(); disk(80, 80, 13, 1); disk(80, 80, 3, 0);
+    timing = check(0);
+    assert(timing.stage_us[DET_TIME_SHAPE] == 7 && timing.stage_us[DET_TIME_SUPPORT] == 0);
+
     dart_detection result;
     assert(green_detect_profiled(NULL, &result, &timing, fake_micros) == -1);
     for (unsigned i = 0; i < DET_TIME_COUNT; ++i) assert(timing.stage_us[i] == 0);
     assert(green_detect_profiled(frame, NULL, &timing, fake_micros) == -1);
     assert(green_detect_profiled(frame, &result, &timing, NULL) == -1);
-    puts("PASS: detector timing/reset/wrap/rejection/multiple candidates/result equivalence");
+    puts("PASS: detector timing/reset/wrap/rejection/multiple candidates/result equivalence/small-core area and green support");
     return 0;
 }

@@ -1,7 +1,7 @@
 /* 机载绿灯识别：从 OV5640 的 YUV422 帧中定位引导灯主候选。
  * 算法与电脑端 green_light_detector（config/rec00038_white_core.yml 白色灯芯配置）
  * 保持同一套阈值与判定流程：HSV 双掩膜 -> 3x3 中值 -> 外轮廓形状筛选 -> 绿色
- * 邻域验证 -> 评分选主候选。阈值不改动；仅把 OpenCV 调用替换为定点 C 实现。
+ * 邻域验证 -> 评分选主候选。以定点 C 实现替换 OpenCV 调用，阈值与配置同步。
  * 坐标系与电脑端一致：原点在图像左上，X 向右、Y 向下，单位为像素。
  * 本文件在 H750 固件与主机验证程序中共用，不依赖任何 HAL。 */
 #include "green_detector.h"
@@ -393,7 +393,7 @@ int green_detect_profiled(const uint8_t *yuv422, dart_detection *out,
             timing_next(&clock, DET_TIME_SHAPE);
             area = (double)area_x2 * 0.5;
 
-            /* 1) 轮廓多边形面积范围：[280, 0.08*总像素=6144] 像素^2。 */
+            /* 1) 轮廓多边形面积范围：[DART_DET_AREA_MIN, 0.08*总像素=6144] 像素^2。 */
             if (area < (double)DART_DET_AREA_MIN) goto candidate_done;
             if (area * 10000 > 0.08 * 10000.0 * (double)DART_DET_PIXELS) goto candidate_done;
             /* 2) 外接矩形长短边比 <= 2.4。 */
