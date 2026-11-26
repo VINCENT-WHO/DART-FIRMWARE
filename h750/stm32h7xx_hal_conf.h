@@ -64,11 +64,12 @@
 /* #define HAL_I2S_MODULE_ENABLED */
 /* #define HAL_IRDA_MODULE_ENABLED */
 /* #define HAL_IWDG_MODULE_ENABLED */
-/* #define HAL_JPEG_MODULE_ENABLED */
+#define HAL_JPEG_MODULE_ENABLED
 /* #define HAL_LPTIM_MODULE_ENABLED */
 /* #define HAL_LTDC_MODULE_ENABLED */
 /* #define HAL_MDIOS_MODULE_ENABLED */
-/* #define HAL_MDMA_MODULE_ENABLED */
+/* JPEG HAL的句柄引用MDMA类型；本版实际编码使用轮询，没有启动MDMA通道。 */
+#define HAL_MDMA_MODULE_ENABLED
 /* #define HAL_MMC_MODULE_ENABLED */
 /* #define HAL_NAND_MODULE_ENABLED */
 /* #define HAL_NOR_MODULE_ENABLED */

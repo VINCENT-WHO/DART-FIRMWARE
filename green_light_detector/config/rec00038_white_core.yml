@@ -1,0 +1,18 @@
+%YAML:1.0
+---
+# REC00038曝光条件：用很亮且接近白色的灯芯定位，仍用独立绿光掩膜做邻域验证。
+hue_min: 35
+hue_max: 95
+saturation_min: 45
+green_value_min: 140
+core_value_min: 252
+core_saturation_max: 35
+median_kernel: 3
+support_radius: 7
+# 针对当前320×240和拍摄距离；保留主灯，拒绝独立的小亮斑。
+area_min: 280.0
+area_max_fraction: 0.08
+aspect_ratio_max: 2.4
+circularity_min: 0.35
+green_pixels_min: 20
+green_fraction_min: 0.08

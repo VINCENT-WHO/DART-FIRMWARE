@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "dart",
+      "displayName": "Dart - Arm GCC / Ninja",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native",
+      "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "dart-debug",
+      "inherits": "dart",
+      "displayName": "Dart - debug stepping (-Og)",
+      "binaryDir": "${sourceDir}/build/native-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dart", "configurePreset": "dart", "jobs": 8 },
+    { "name": "dart-f103", "configurePreset": "dart", "targets": ["dart_f103"], "jobs": 8 },
+    { "name": "dart-h750", "configurePreset": "dart", "targets": ["dart_h750"], "jobs": 8 },
+    { "name": "dart-debug", "configurePreset": "dart-debug", "jobs": 8 }
+  ]
+}

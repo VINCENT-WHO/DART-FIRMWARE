@@ -1,0 +1,13 @@
+// Ozone 3.40+ GDB client -> OpenOCD -> onboard DartDAP -> F103.
+// First run VSCode task "Start F103 OpenOCD server for Ozone".
+// Opening this project does not start a session or download automatically.
+// Availability is subject to this Ozone installation's third-party probe license.
+void OnProjectLoad(void) {
+  Project.AddPathSubstitute("/dart_firmware", "$(ProjectDir)");
+  Project.SetDevice("STM32F103C8");
+  Project.SetHostIF("GDB_Server", "127.0.0.1:3333");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("100 kHz");
+  Edit.SysVar(VAR_GDB_SERVER_TYPE, GDB_SERVER_TYPE_OPENOCD);
+  File.Open("$(ProjectDir)/build/native/f103/dart_f103.elf");
+}

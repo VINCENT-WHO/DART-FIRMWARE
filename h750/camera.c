@@ -1,16 +1,22 @@
-/* Continuous JPEG frame queue, adapted from the supplied board-verified driver. */
+/* Continuous YUV422 frame queue, adapted from the supplied board-verified driver.
+ * 机载绿灯标注版：相机不再使用片上 JPEG 压缩，直接输出 YUV422 原始像素流，
+ * 由固件完成检测、画圈标注与 JPEG 编码后写入 AVI。 */
 #include "stm32h7xx_hal.h"
 #include "camera_perf.h"
+#include "camera_slots.h"
 #include <string.h>
 #include <stdio.h>
 extern uint32_t board_micros(void);
-uint8_t camera_workspace[512u*1024u] __attribute__((section(".camera_buffer"),aligned(32)));
-static uint8_t d2_workspace[192u*1024u] __attribute__((section(".camera_d2"),aligned(32)));
-#define CAPACITY (64u*1024u)
-#define SLOTS 10u
-static uint8_t *buffers[SLOTS];
-static volatile unsigned active,current,state[SLOTS];
-static uint32_t sizes[SLOTS],times[SLOTS];
+/* AXI SRAM 帧缓冲区：2 个 YUV 帧 slot（每帧 320x240x2=153600 字节），
+ * 其余空间由绿灯检测器（掩膜）与 JPEG 编码输出缓冲使用。 */
+uint8_t camera_workspace[307200u] __attribute__((section(".camera_buffer"),aligned(32)));
+/* D2 SRAM：1 个帧 slot 加 IMU 队列与检测工作区。 */
+static uint8_t d2_workspace[153600u] __attribute__((section(".camera_d2"),aligned(32)));
+#define CAPACITY (153600u)
+/* 槽位登记见 camera_slots.h：处理端永远取最新拍完的帧，用不上的旧帧被淘汰。 */
+static uint8_t *buffers[CAM_SLOT_COUNT];
+static camera_slots slots;
+static volatile unsigned active;
 volatile uint32_t camera_frames,camera_drops,camera_errors,camera_invalid;
 static DMA_HandleTypeDef pdma;
 static unsigned configured;
@@ -26,17 +32,24 @@ int camera_configure(void){
     e|=pair(0x3808,320);e|=pair(0x380A,240);e|=pair(0x380C,1892);e|=pair(0x380E,1015);
     e|=pair(0x3810,16);e|=pair(0x3812,6);e|=wr(0x3814,0x31);e|=wr(0x3815,0x31);
     e|=wr(0x3618,0);e|=wr(0x3612,0x29);e|=wr(0x3708,0x64);e|=wr(0x3709,0x52);e|=wr(0x370C,3);
-    e|=change(0x3820,1,1);e|=change(0x3821,0x21,0x21);
+    /* 翻转位（0x3820/0x3821 bit0）保留板级已验证组合；0x3821 bit5 是片上
+     * JPEG 压缩使能，YUV422 模式必须清零。 */
+    e|=change(0x3820,1,1);e|=change(0x3821,0x21,0x01);
+    /* YUV422：0x4300=0x30 与 0x501F=0x00（Y0CbY1Cr 顺序）与 JPEG 模式取值相同。
+     * JPEG 专属步骤全部撤销：0x3002 恢复通用值 0x1C（JPEG 块保持复位）、
+     * 0x3006 恢复通用值 0xC3（JPEG 时钟关闭），参照 vendor 驱动 OV5640_Common。 */
     e|=wr(0x4300,0x30);e|=wr(0x501F,0);e|=wr(0x5001,0xA3);
-    e|=change(0x3002,0x1C,0);e|=change(0x3006,0x28,0x28);
+    e|=wr(0x3002,0x1C);e|=wr(0x3006,0xC3);
     e|=wr(0x4713,3);e|=wr(0x4407,12);e|=wr(0x440E,0);
     e|=wr(0x460B,0x37);e|=wr(0x460C,0x22);e|=wr(0x3824,4);e|=wr(0x4740,0x23);
     e|=pair(0x4602,320);e|=pair(0x4604,240);
     e|=wr(0x4001,2);e|=wr(0x4004,2);e|=change(0x3A00,4,0);e|=wr(0x3503,0);
-    e|=pair(0x3A02,1011);e|=pair(0x3A14,1011);
-    /* Recalculate anti-flicker exposure steps for the 96 MHz / 1892 HTS
-     * timing. Inheriting the low-clock BSP's limits can extend exposure. */
-    e|=pair(0x3A08,507);e|=pair(0x3A0A,423);e|=wr(0x3A0E,1);e|=wr(0x3A0D,2);
+    /* 对照录像：自动曝光上限由1011行降到507行，仍允许相机自动调节曝光和增益。
+     * 保留一档50 Hz防频闪步长，并使两种频率的最大步数与新上限一致。 */
+    const unsigned exposure_limit_lines=507, band_50_lines=507, band_60_lines=423;
+    e|=pair(0x3A02,exposure_limit_lines);e|=pair(0x3A14,exposure_limit_lines);
+    e|=pair(0x3A08,band_50_lines);e|=pair(0x3A0A,band_60_lines);
+    e|=wr(0x3A0E,exposure_limit_lines/band_50_lines);e|=wr(0x3A0D,exposure_limit_lines/band_60_lines);
     e|=pair(0x350C,0);e|=wr(0x503D,0);e|=wr(0x3008,2);HAL_Delay(600);
     configured=e==0;return e;
 }
@@ -53,7 +66,7 @@ void camera_timing(void){
     bench_puts("CAM TIMING END\r\n");
 }
 static void dma_off(void){DMA2_Stream1->CR&=~DMA_SxCR_EN;uint32_t t=DWT->CYCCNT;while(DMA2_Stream1->CR&DMA_SxCR_EN)if((uint32_t)(DWT->CYCCNT-t)>SystemCoreClock/1000){camera_errors|=8;break;}}
-static void arm(unsigned slot){DMA2->LIFCR=0xF40;DMA2_Stream1->M0AR=(uint32_t)buffers[slot];DMA2_Stream1->NDTR=CAPACITY/4;__DMB();DMA2_Stream1->CR|=DMA_SxCR_EN;}
+static void arm(void){DMA2->LIFCR=0xF40;DMA2_Stream1->M0AR=(uint32_t)buffers[slots.current];DMA2_Stream1->NDTR=CAPACITY/4;__DMB();DMA2_Stream1->CR|=DMA_SxCR_EN;}
 int perf_dma_irq(void){return active?1:0;}
 int perf_dcmi_irq(void){
     if(!active)return 0;
@@ -63,24 +76,22 @@ int perf_dcmi_irq(void){
     if(f&DCMI_RIS_FRAME_RIS){
         camera_frames++;uint32_t t=DWT->CYCCNT;
         while((DCMI->SR&DCMI_SR_FNE)&&((uint32_t)(DWT->CYCCNT-t)<SystemCoreClock/10000)){}
-        dma_off();__DSB();uint32_t n=(CAPACITY/4-DMA2_Stream1->NDTR)*4;unsigned ok=0;
-        if(n>=4&&n<=CAPACITY&&buffers[current][0]==255&&buffers[current][1]==216){
-            uint32_t low=n>64?n-64:2;
-            for(uint32_t i=n-1;i>low;i--)if(buffers[current][i-1]==255&&buffers[current][i]==217){n=i+1;ok=1;break;}
-        }
-        if(ok){unsigned next=SLOTS;for(unsigned i=0;i<SLOTS;i++)if(state[i]==0){next=i;break;}
-            if(next<SLOTS){sizes[current]=n;times[current]=board_micros();__DMB();state[current]=2;current=next;state[current]=1;}
-            else camera_drops++;
+        dma_off();__DSB();uint32_t n=(CAPACITY/4-DMA2_Stream1->NDTR)*4;
+        /* YUV422 帧没有 JPEG SOI/EOI 标记可扫描：完整帧的判定条件就是 DMA
+         * 恰好传满 320x240x2 字节；不足说明行同步丢失，按无效帧丢弃。 */
+        if(n==CAPACITY){
+            /* 交付这一帧；没有空闲槽时淘汰最旧的就绪帧。只有两种帧计入丢帧：
+             * 这一帧没交付，或者它挤掉了一帧更旧的。处理中的槽不会被改写。 */
+            if(cam_frame_complete(&slots,board_micros(),n)!=CAM_FRAME_PUBLISHED)camera_drops++;
         }else camera_invalid++;
-        arm(current);
+        arm();
     }
     return 1;
 }
 int camera_start(void){
     if(!configured)return -1;
     __HAL_RCC_D2SRAM1_CLK_ENABLE();__HAL_RCC_D2SRAM2_CLK_ENABLE();__HAL_RCC_D2SRAM3_CLK_ENABLE();
-    camera_perf_bus();unsigned n=0;for(unsigned i=0;i<7;i++)buffers[n++]=camera_workspace+i*CAPACITY;
-    for(unsigned i=0;i<3;i++)buffers[n++]=d2_workspace+i*CAPACITY;
+    camera_perf_bus();buffers[0]=camera_workspace;buffers[1]=camera_workspace+CAPACITY;buffers[2]=d2_workspace;
     memset(&pdma,0,sizeof(pdma));pdma.Instance=DMA2_Stream1;pdma.Init.Request=DMA_REQUEST_DCMI;
     pdma.Init.Direction=DMA_PERIPH_TO_MEMORY;pdma.Init.MemInc=DMA_MINC_ENABLE;pdma.Init.PeriphInc=DMA_PINC_DISABLE;
     pdma.Init.PeriphDataAlignment=DMA_PDATAALIGN_WORD;pdma.Init.MemDataAlignment=DMA_MDATAALIGN_WORD;
@@ -88,18 +99,21 @@ int camera_start(void){
     if(HAL_DMA_Init(&pdma)!=HAL_OK)return -1;
     DMA2_Stream1->PAR=(uint32_t)&DCMI->DR;
     DMA2_Stream1->CR&=~(DMA_SxCR_TCIE|DMA_SxCR_HTIE|DMA_SxCR_TEIE|DMA_SxCR_DMEIE);
-    /* Board-verified polarity combination 5. */
-    DCMI->CR=DCMI_CR_JPEG|DCMI_CR_PCKPOL|DCMI_CR_HSPOL;
+    /* Board-verified polarity combination 5. JPEG 位不再置位：YUV422 像素流
+     * 需要 DCMI 硬件按 VSYNC/HREF 同步每帧。 */
+    DCMI->CR=DCMI_CR_PCKPOL|DCMI_CR_HSPOL;
     DCMI->ICR=0x1F;DCMI->IER=DCMI_IER_FRAME_IE|DCMI_IER_OVR_IE|DCMI_IER_ERR_IE;
-    memset((void*)state,0,sizeof(state));current=0;state[0]=1;camera_frames=camera_drops=camera_errors=camera_invalid=0;
-    active=1;arm(0);HAL_NVIC_SetPriority(DCMI_IRQn,2,0);HAL_NVIC_ClearPendingIRQ(DCMI_IRQn);HAL_NVIC_EnableIRQ(DCMI_IRQn);
+    camera_frames=camera_drops=camera_errors=camera_invalid=0;cam_slots_reset(&slots);
+    active=1;arm();HAL_NVIC_SetPriority(DCMI_IRQn,2,0);HAL_NVIC_ClearPendingIRQ(DCMI_IRQn);HAL_NVIC_EnableIRQ(DCMI_IRQn);
     DCMI->CR|=DCMI_CR_ENABLE|DCMI_CR_CAPTURE;return 0;
 }
 void camera_stop(void){HAL_NVIC_DisableIRQ(DCMI_IRQn);DCMI->IER=0;DCMI->CR&=~(DCMI_CR_CAPTURE|DCMI_CR_ENABLE);dma_off();active=0;DCMI->ICR=0x1F;}
+/* 取最新拍完的一帧：处理一帧远慢于相机出帧，排队最久的帧是过期画面。
+ * 没有就绪帧返回 -1，调用方不应等待，直接做别的事再来取。 */
 int camera_take(const uint8_t **bytes,uint32_t *length,uint32_t *time){
-    int best=-1;uint32_t irq=__get_PRIMASK();__disable_irq();
-    for(unsigned i=0;i<SLOTS;i++)if(state[i]==2&&(best<0||(int32_t)(times[i]-times[best])<0))best=(int)i;
-    if(best>=0){state[best]=3;*bytes=buffers[best];*length=sizes[best];*time=times[best];}
-    __set_PRIMASK(irq);return best;
+    uint32_t irq=__get_PRIMASK();__disable_irq();
+    int slot=cam_take_newest(&slots,length,time);
+    if(slot>=0)*bytes=buffers[slot];
+    __set_PRIMASK(irq);return slot;
 }
-void camera_release(unsigned slot){if(slot<SLOTS){__DMB();state[slot]=0;}}
+void camera_release(unsigned slot){cam_release(&slots,slot);}

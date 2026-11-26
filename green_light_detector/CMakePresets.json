@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "msys2-local",
+      "displayName": "本机MSYS2 UCRT64与OpenCV",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "environment": {
+        "PATH": "${sourceDir}/runtime/ucrt64/bin;D:/CppDev/msys64/ucrt64/bin;D:/CppDev/msys64/usr/bin;$penv{PATH}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "D:/CppDev/msys64/ucrt64/bin/g++.exe",
+        "CMAKE_MAKE_PROGRAM": "D:/CppDev/msys64/ucrt64/bin/ninja.exe",
+        "OpenCV_DIR": "D:/CppDev/msys64/ucrt64/lib/cmake/opencv4"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "msys2-local", "configurePreset": "msys2-local", "jobs": 4 }
+  ],
+  "testPresets": [
+    { "name": "msys2-local", "configurePreset": "msys2-local", "output": { "outputOnFailure": true } }
+  ]
+}

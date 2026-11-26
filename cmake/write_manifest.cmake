@@ -1,0 +1,10 @@
+# 原生 CMake 编译结束后生成校验清单，供烧录工具验证目标和文件哈希。
+file(SHA256 "${BIN}" HASH)
+file(SIZE "${BIN}" SIZE)
+if(SIZE GREATER LIMIT)
+    message(FATAL_ERROR "固件超出芯片标称 Flash 容量")
+endif()
+if(NOT DEFINED VERSION)
+    set(VERSION "2.0.0")
+endif()
+file(WRITE "${OUT}" "{\n  \"version\": \"${VERSION}\",\n  \"target\": \"${CHIP}\",\n  \"flash_start\": \"0x08000000\",\n  \"flash_bytes\": ${SIZE},\n  \"sha256\": \"${HASH}\"\n}\n")

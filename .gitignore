@@ -1,6 +1,26 @@
-# 只显示准备分享的源码
+# 只跟踪准备分享的源码、构建脚本和识别程序（白名单制，其余默认忽略）
 /*
 !/.gitignore
+!/CMakeLists.txt
+!/CMakePresets.json
+!/requirements.txt
+!/*.jdebug
 !/f103/
 !/h750/
 !/common/
+!/cmake/
+!/debug/
+!/tests/
+!/tools/
+!/docs/
+!/vendor/
+!/green_light_detector/
+
+# 本机专用配置与生成物
+__pycache__/
+*.pyc
+CMakeUserPresets.json
+green_light_detector/build/
+green_light_detector/dependencies/
+green_light_detector/runtime/
+green_light_detector/.vscode/

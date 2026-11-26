@@ -1,0 +1,10 @@
+// Optional: requires a real J-Link connected to the F103 SWD pins.
+// The onboard DartDAP is CMSIS-DAP and is not a J-Link.
+void OnProjectLoad(void) {
+  Project.AddPathSubstitute("/dart_firmware", "$(ProjectDir)");
+  Project.SetDevice("STM32F103C8");
+  Project.SetHostIF("USB", "");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("100 kHz");
+  File.Open("$(ProjectDir)/build/f103/dart_f103.elf");
+}

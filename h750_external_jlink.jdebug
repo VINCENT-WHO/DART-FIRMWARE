@@ -1,0 +1,10 @@
+// Optional: requires a real J-Link connected to the H750 SWD pins.
+// The existing Type-C/DFU connection does not provide a J-Link debug channel.
+void OnProjectLoad(void) {
+  Project.AddPathSubstitute("/dart_firmware", "$(ProjectDir)");
+  Project.SetDevice("STM32H750VB");
+  Project.SetHostIF("USB", "");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("100 kHz");
+  File.Open("$(ProjectDir)/build/h750/dart_h750.elf");
+}
