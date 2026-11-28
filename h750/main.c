@@ -10,6 +10,7 @@
 #include "camera_exposure.h"
 #include "camera_test.h"
 #include "green_detector.h"
+#include "green_filter.h"
 #include "jpeg_enc.h"
 #include "jpeg_hw.h"
 #include "record_profile.h"
@@ -21,7 +22,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DART_RECORDING_VERSION "2.2.2-rgb-roi3ms"
+#define DART_RECORDING_VERSION "2.4.0-green-ekf"
 
 extern int board_clock_start(void);
 extern int board_storage_start(void);
@@ -61,8 +62,12 @@ static uint32_t det_evals, det_hits, enc_fails;
 static uint32_t t_detect_us, t_annotate_us, t_encode_us, t_write_us, t_frame_us;
 /* 耗时明细放DTCM的普通.bss，不占相机AXI SRAM；只在主循环访问。 */
 static record_profile frame_profile;
+static green_filter filter_state;
+/* 600条明细72000字节，放AXI；不占DTCM栈，不在采集期间格式化CSV。 */
+static green_filter_log filter_log __attribute__((section(".camera_buffer"),aligned(32)));
+static uint32_t filter_export_us,filter_export_failed;
 static uint32_t profile_export_us, profile_export_failed;
-static char directory[16], video_path[40], log_path[40], csv_path[40], info_path[40], det_path[40], profile_path[40];
+static char directory[16], video_path[40], log_path[40], csv_path[40], info_path[40], det_path[40], profile_path[40], filter_path[40];
 #define MAX_FRAMES 600u
 /* 与主机验证管线（tests/onboard_pipeline.c 默认值）一致的编码质量。 */
 #define DART_JPEG_QUALITY 75
@@ -256,7 +261,7 @@ static void save_frame(const uint8_t *bytes, uint32_t n, uint32_t time)
     uint8_t info[12]; dart_put32(info, saved_frames); dart_put32(info + 4, n); dart_put32(info + 8, camera_frames);
     log_packet(17, time, info, 12); saved_frames++; movi_bytes += 8 + n + (n & 1);
 }
-/* 板内完整识别管线：检测 -> 标注 -> JPEG 编码 -> AVI 帧落盘 + DETECT.CSV 行。
+/* 板内管线：检测 -> EKF估计/RAM明细 -> 原始检测标注 -> JPEG -> AVI/DETECT。
  * bytes 指向相机 slot 里的 YUV422 帧（slot 已被 camera_take 持有，DMA 不会再写）；
  * 外接矩形与坐标文本直接画在该缓冲内，随后整帧编码成 Baseline JPEG。
  * 标注在检测之后进行，因此绘图不会影响检测（阈值判定只看原始帧）。 */
@@ -265,8 +270,10 @@ static void process_frame(const uint8_t *bytes, uint32_t time)
     if ((int32_t)(time - start_us) < 0 || (int32_t)(time - end_us) >= 0) return;
     if (saved_frames >= MAX_FRAMES) { failed = 1; return; }
     det_evals++;
-    uint32_t t0 = board_micros(), t1, t2, t3, t4;
+    uint32_t t0 = board_micros(), t1, tf, t2, t3, t4;
     record_profile_row timing = {0};
+    green_filter_row filter_row={0};
+    filter_row.time_us=time-start_us;filter_row.avi_index=UINT32_MAX;filter_row.estimate.nis=-1;
     timing.capture_us = time - start_us;
     timing.queue_us = t0 - time;
     timing.avi_index = UINT32_MAX;
@@ -277,11 +284,17 @@ static void process_frame(const uint8_t *bytes, uint32_t time)
     t1 = board_micros();
     timing.stage_us[0] = t1 - t0;
     if (result) { failed = 1; t4 = t1; goto profile_complete; }
+    filter_row.measured[0]=(float)det.center_x_q16/65536.0f;
+    filter_row.measured[1]=(float)det.center_y_q16/65536.0f;
+    filter_row.measured[2]=(float)det.area_q8/256.0f;
+    green_filter_step(&filter_state,time,det.found,filter_row.measured[0],
+        filter_row.measured[1],filter_row.measured[2],&filter_row.estimate);
+    tf=board_micros();timing.filter_us=filter_row.elapsed_us=tf-t1;
     if (det.found) det_hits++;
     green_annotate((uint8_t *)bytes, &det, (int)saved_frames,
                    (int32_t)(((time - start_us) / 1000u) * 256u));
     t2 = board_micros();
-    timing.stage_us[1] = t2 - t1;
+    timing.stage_us[1] = t2 - tf;
     uint32_t jpeg_size = DART_JPEG_OUT_MAX;
     result = jpeg_encode_yuv422(bytes, DART_JPEG_QUALITY, jpeg_out, &jpeg_size);
     t3 = board_micros();
@@ -311,6 +324,8 @@ profile_complete:
     t_frame_us += timing.total_us;
     uint32_t cycle_start = DWT->CYCCNT;
     uint32_t slot = record_profile_append(&frame_profile, &timing);
+    filter_row.avi_index=timing.avi_index;
+    green_filter_log_append(&filter_log,&filter_row);
     record_profile_note_cycles(&frame_profile, slot, DWT->CYCCNT - cycle_start);
 }
 static void stop_stream(void)
@@ -364,6 +379,27 @@ static int export_csv(void)
     }
     if (used && write_exact(&csvfile, log_buffer, used) != FR_OK) error = 1;
     if (f_close(&input) != FR_OK || decode.errors || decode.count || csv_rows != saved_imu) error = 1;
+    return error ? -1 : 0;
+}
+static int export_filter(void)
+{
+    FIL output;
+    if(f_open(&output,filter_path,FA_WRITE|FA_CREATE_NEW)!=FR_OK)return -1;
+    int error=write_exact(&output,green_filter_csv_header,(UINT)strlen(green_filter_csv_header))!=FR_OK;
+    unsigned used=0;
+    for(uint32_t i=0;i<filter_log.stored && !error;++i) {
+        char line[GREEN_FILTER_CSV_LINE_CAPACITY];
+        int n=green_filter_csv_line(line,sizeof(line),i+1,&filter_log.rows[i]);
+        if(n<0 || (unsigned)n>=sizeof(line)){error=1;break;}
+        if(used+(unsigned)n>sizeof(log_buffer)) {
+            if(write_exact(&output,log_buffer,used)!=FR_OK){error=1;break;}
+            used=0;
+        }
+        memcpy(log_buffer+used,line,(unsigned)n);used+=(unsigned)n;
+        if(HAL_GetTick()-last_led_sent>=500)send_led();
+    }
+    if(!error && used && write_exact(&output,log_buffer,used)!=FR_OK)error=1;
+    if(f_close(&output)!=FR_OK)error=1;
     return error ? -1 : 0;
 }
 static int export_profile(void)
@@ -444,6 +480,22 @@ static void write_profile_info(FIL *info)
         DART_DET_G_MIN,2*DART_DET_GREEN_EXCESS_MIN,DART_DET_AREA_MIN,DART_DET_AREA_MAX,
         (unsigned)DART_DET_ROI_MIN_PADDING);
     if (n < 0 || (unsigned)n >= sizeof(text) || write_exact(info,text,(UINT)n) != FR_OK) failed = 1;
+    uint32_t divisor_filter=filter_log.attempts ? filter_log.attempts : 1;
+    n=snprintf(text,sizeof(text),
+        "\r\n绿灯EKF：%s；模式=%s；x/y/vx/vy/s/ds；仅记录，不反馈ROI或控制。\r\n"
+        "估计尝试=%lu；明细=%lu；容量丢弃=%lu；平均=%lu us；最大=%lu us；导出=%lu us；导出失败=%lu。\r\n"
+        "估计耗时独立计入TIMING末列及处理总计，不计入检测/绘图列。\r\n"
+        "状态：等待=%lu；初始化=%lu；更新=%lu；仅预测=%lu；拒绝观测=%lu；丢失=%lu；重建=%lu；时间无效=%lu；数值重置=%lu。\r\n",
+        filter_path,GREEN_FILTER_CALIBRATED_K>0 ? "已设置K，s单位1/m" : "未标定：K=首次面积，s为相对距离倒数",
+        (unsigned long)filter_log.attempts,(unsigned long)filter_log.stored,(unsigned long)filter_log.dropped,
+        (unsigned long)(filter_log.sum_us/divisor_filter),(unsigned long)filter_log.max_us,
+        (unsigned long)filter_export_us,(unsigned long)filter_export_failed,
+        (unsigned long)filter_log.status_count[0],(unsigned long)filter_log.status_count[1],
+        (unsigned long)filter_log.status_count[2],(unsigned long)filter_log.status_count[3],
+        (unsigned long)filter_log.status_count[4],(unsigned long)filter_log.status_count[5],
+        (unsigned long)filter_log.status_count[6],(unsigned long)filter_log.status_count[7],
+        (unsigned long)filter_log.status_count[8]);
+    if(n<0 || (unsigned)n>=sizeof(text) || write_exact(info,text,(UINT)n)!=FR_OK)failed=1;
 }
 static void write_info(void)
 {
@@ -539,6 +591,9 @@ static void close_session(void)
         profile_export_failed = export_profile() != 0;
         profile_export_us = board_micros() - export_begin;
         if (profile_export_failed) failed = 1;
+        export_begin=board_micros();filter_export_failed=export_filter()!=0;
+        filter_export_us=board_micros()-export_begin;
+        if(filter_export_failed)failed=1;
     }
     /* 转换完成后追加最终标记；FINAL覆盖采集、CSV转换和耗时导出的结果。 */
     if (f_open(&logfile, log_path, FA_WRITE | FA_OPEN_EXISTING) == FR_OK) {
@@ -579,6 +634,7 @@ static int select_paths(uint32_t token, unsigned auto_mode)
         snprintf(info_path, sizeof(info_path), "%s/INFO.TXT", directory);
         snprintf(det_path, sizeof(det_path), "%s/DETECT.CSV", directory);
         snprintf(profile_path, sizeof(profile_path), "%s/TIMING.CSV", directory);
+        snprintf(filter_path,sizeof(filter_path),"%s/FILTER.CSV",directory);
     } else {
         session_token = token;
         snprintf(video_path, sizeof(video_path), "D%06lX.AVI", (unsigned long)token);
@@ -587,8 +643,9 @@ static int select_paths(uint32_t token, unsigned auto_mode)
         snprintf(info_path, sizeof(info_path), "D%06lX.TXT", (unsigned long)token);
         snprintf(det_path, sizeof(det_path), "D%06lX.DET", (unsigned long)token);
         snprintf(profile_path, sizeof(profile_path), "D%06lX.PRF", (unsigned long)token);
+        snprintf(filter_path,sizeof(filter_path),"D%06lX.FLT",(unsigned long)token);
         FILINFO info;
-        const char *paths[] = {video_path, log_path, csv_path, info_path, det_path, profile_path};
+        const char *paths[] = {video_path, log_path, csv_path, info_path, det_path, profile_path, filter_path};
         for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
             if (f_stat(paths[i], &info) != FR_NO_FILE) return -1;
     }
@@ -604,6 +661,8 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
     det_evals = det_hits = enc_fails = 0;
     t_detect_us = t_annotate_us = t_encode_us = t_write_us = t_frame_us = 0;
     record_profile_reset(&frame_profile); profile_export_us = profile_export_failed = 0;
+    green_filter_reset(&filter_state);green_filter_log_reset(&filter_log);
+    filter_export_us=filter_export_failed=0;
     det_reset_tracking(); det_reset_stats();
     pre_head = pre_count = 0; first_imu = 1; memset(&trigger, 0, sizeof(trigger));
     session_imu_overflows = imu_overflows; session_crc_errors = parser.errors; session_uart_errors = uart_errors;
@@ -639,6 +698,9 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
         step = "WRITE DET HDR"; if ((code = write_exact(&detfile, det_header, (UINT)strlen(det_header))) != FR_OK) goto fail;
     }
     log_event("VERSION " DART_RECORDING_VERSION);
+    if(camera_mode)log_event(GREEN_FILTER_CALIBRATED_K>0 ?
+        "FILTER EKF6 K=calibrated timestamp=capture log=FILTER.CSV" :
+        "FILTER EKF6 K=first_area s=relative timestamp=capture log=FILTER.CSV");
     if (camera_mode) {
         char config[72];
         snprintf(config,sizeof(config),"EXP us=%lu lines=%lu raw=%lu verify=%lu gain=auto",

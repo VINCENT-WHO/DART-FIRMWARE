@@ -21,6 +21,10 @@ profile_exe=out/('test_record_profile.exe' if os.name=='nt' else 'test_record_pr
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-I'+str(ROOT/'h750'),
     str(ROOT/'tests/test_record_profile.c'),str(ROOT/'h750/record_profile.c'),'-o',str(profile_exe)],check=True)
 subprocess.run([str(profile_exe)],check=True)
+filter_exe=out/('test_green_filter.exe' if os.name=='nt' else 'test_green_filter')
+subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
+    '-I'+str(ROOT/'h750'),str(ROOT/'tests/test_green_filter.c'),'-o',str(filter_exe),'-lm'],check=True)
+subprocess.run([str(filter_exe)],check=True)
 detector_exe=out/('test_rgb_detector.exe' if os.name=='nt' else 'test_rgb_detector')
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
     '-Wno-misleading-indentation','-I'+str(ROOT/'h750'),
@@ -75,5 +79,6 @@ try:
 except ImportError:print('Pillow/OpenCV unavailable: skipped generated JPEG/AVI decode');avi_result='NOT RUN'
 report={'result':'PASS','c_randomized_cases':10000,'python_wire_lengths':81,'crc_corruption_and_truncated_tail':'PASS','timestamp_wrap_and_sync':'PASS','imu_gap_detection':'PASS','generated_avi_decode':avi_result,'record_profile_capacity_errors_csv_reset':'PASS','rgb_detection_area_centroid_input_unchanged_and_timing':'PASS','fixed_exposure_register_logic':'PASS','sliding_median_immutable_reference_and_guards':'PASS','hardware':'NOT RUN'}
 report['roi_bounds_halo_motion_reacquire_reset']='PASS'
+report['green_ekf_model_covariance_time_missing_gate_log']='PASS'
 (out/'validation.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
 print(json.dumps(report,indent=2))

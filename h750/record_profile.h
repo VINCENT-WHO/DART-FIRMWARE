@@ -22,6 +22,7 @@ typedef struct {
     uint32_t result;
     uint32_t append_cycles;          /* 仅测RAM追加及汇总统计的CPU周期 */
     dart_detection_timing detection;
+    uint32_t filter_us; /* 独立EKF阶段，已包含在total_us，不含文件导出 */
 } record_profile_row;
 
 typedef struct {
@@ -40,7 +41,7 @@ void record_profile_note_cycles(record_profile *profile, uint32_t slot, uint32_t
 /* 仅在采集停止后调用文本格式化；头部为UTF-8 BOM，单位在列名中。 */
 extern const char record_profile_csv_header[];
 extern const char *const record_profile_detection_names[DET_TIME_COUNT];
-/* 25列最宽十进制数及分隔符、CRLF、NUL的上界。 */
+/* 26列最宽十进制数及分隔符、CRLF、NUL的上界。 */
 #define RECORD_PROFILE_CSV_LINE_CAPACITY 288u
 int record_profile_csv_line(char *buffer, size_t capacity, uint32_t attempt,
                             const record_profile_row *row);

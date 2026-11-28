@@ -9,7 +9,7 @@
 | 芯片 | 版本 | 职责 |
 | --- | --- | --- |
 | STM32F103C8T6 | 2.0.0 | 读取 BMI088（±24g 量程），把原始数据发给 H750；转发电脑串口命令；四路舵机 PWM |
-| STM32H750VBT6 | 2.2.2-rgb-roi3ms | OV5640 采集 320×240 图像；逐帧识别绿灯；硬件 JPEG 编码；把结果写入 TF 卡 |
+| STM32H750VBT6 | 2.4.0-green-ekf | OV5640采集320×240图像；ROI绿灯检测及六维EKF记录；硬件JPEG编码；保存TF卡 |
 
 一次记录的流程：
 
@@ -22,10 +22,11 @@ TF 卡上每次记录是一个 `REC#####` 目录：
 
 | 文件 | 内容 |
 | --- | --- |
-| `VIDEO.AVI` | 320×240 MJPEG 录像，检出时画黄圈并标出中心坐标 |
+| `VIDEO.AVI` | 320×240 MJPEG录像，检出时画外接矩形并标出原始检测中心 |
 | `DETECT.CSV` | 每帧的中心坐标（像素）和检出标志 |
+| `FILTER.CSV` | 原始质心/面积、EKF预测与校正状态、协方差、状态码及估计耗时 |
 | `IMU.CSV`、`IMU.DLG` | IMU 数据和原始记录 |
-| `TIMING.CSV` | 每帧检测、标注、编码、保存耗时，含识别内部 7 个步骤及搜索框/回退模式 |
+| `TIMING.CSV` | 每帧检测、标注、编码、保存耗时，含识别内部7步、搜索框/回退模式及独立EKF耗时 |
 | `INFO.TXT` | 本次记录的汇总信息 |
 
 ## 目录结构
@@ -34,7 +35,8 @@ TF 卡上每次记录是一个 `REC#####` 目录：
 f103/                   F103 固件源码和链接脚本
 h750/                   H750 固件源码和链接脚本
   green_detector.c/.h     机载绿灯识别
-  green_annotate.c        在图像上画圈和坐标
+  green_filter.c/.h       六维EKF与FILTER.CSV格式化
+  green_annotate.c        在图像上画矩形和坐标
   camera.c, camera_slots.h  相机采集与帧槽管理
   jpeg_hw.c, jpeg_mcu.c   硬件 JPEG 后端
   jpeg_enc.c              软件 JPEG 参考实现（固件不链接）
@@ -118,6 +120,8 @@ Ozone 调试工程：
 - **电脑端**（`green_light_detector/`）：历史双掩膜离线程序，与当前机载算法不再等价。
 
 入口、阈值对应关系和测试命令见 [docs/识别程序说明.md](docs/识别程序说明.md)，电脑端的使用说明见 [docs/绿灯识别程序.md](docs/绿灯识别程序.md)。
+
+六维EKF模型、K标定、丢失处理和CSV字段见 [docs/绿灯滤波状态估计.md](docs/绿灯滤波状态估计.md)。未标定时输出相对距离倒数；估计结果只记录，不反馈ROI或姿态控制。当前main基于ROI稳定版，编码/写回优化仍在 `dev_writeback-optimize`。
 
 ## 测试
 

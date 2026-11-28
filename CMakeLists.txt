@@ -23,7 +23,7 @@ endforeach()
 add_executable(dart_h750
     h750/main.c h750/board.c h750/camera.c h750/camera_test.c h750/diskio_sd.c
     h750/sd_trace.c h750/usbd_conf.c h750/usb_tf.c common/protocol.c common/avi.c common/auto_record.c
-    h750/green_detector.c h750/green_annotate.c h750/jpeg_hw.c h750/jpeg_mcu.c h750/record_profile.c
+    h750/green_detector.c h750/green_filter.c h750/green_annotate.c h750/jpeg_hw.c h750/jpeg_mcu.c h750/record_profile.c
     ${V}/ov5640/ov5640.c ${V}/ov5640/ov5640_reg.c ${V}/fatfs/source/ff.c
     ${V}/cmsis-device-h7/Source/Templates/system_stm32h7xx.c
     ${V}/cmsis-device-h7/Source/Templates/gcc/startup_stm32h750xx.s
@@ -52,7 +52,7 @@ foreach(chip f103 h750)
         set(cpu cortex-m7)
         set(device STM32H750VBT6)
         set(flash_limit 131072)
-        set(firmware_version "2.2.2-rgb-roi3ms")
+        set(firmware_version "2.4.0-green-ekf")
     endif()
     target_compile_options(${target} PRIVATE -mcpu=${cpu} -mthumb -mfloat-abi=soft
         -ffunction-sections -fdata-sections -fno-common -gdwarf-4 -Wall -Wextra -Werror

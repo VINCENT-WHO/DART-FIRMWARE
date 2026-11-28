@@ -24,17 +24,18 @@ int main(void)
     row.detection.search_x = 17; row.detection.search_y = 25;
     row.detection.search_w = 31; row.detection.search_h = 43;
     row.detection.search_mode = DET_SEARCH_FALLBACK;
+    row.filter_us=7;row.total_us+=7;
     assert(record_profile_append(p, &row) == 0);
     record_profile_note_cycles(p, 0, 400);
     assert(p->rows[0].append_cycles == 400);
     row.result = PROFILE_ENCODE_ERROR; row.avi_index = UINT32_MAX;
-    row.stage_us[2] = 90; row.stage_us[3] = 0; row.total_us = 120;
+    row.stage_us[2] = 90; row.stage_us[3] = 0; row.filter_us=11;row.total_us = 131;
     assert(record_profile_append(p, &row) == 1);
     record_profile_note_cycles(p, 1, 600);
     assert(p->attempts == 2 && p->stored == 2 && p->dropped_rows == 0);
     assert(p->result_count[PROFILE_OK] == 1 && p->result_count[PROFILE_ENCODE_ERROR] == 1);
     assert(p->stage_sum[2] == 120 && p->stage_max[2] == 90);
-    assert(p->total_sum == 220 && p->total_max == 120 && p->queue_sum == 50);
+    assert(p->total_sum == 238 && p->total_max == 131 && p->queue_sum == 50);
     assert(p->append_cycle_sum == 1000 && p->append_cycle_max == 600);
     for (unsigned i = 0; i < DET_TIME_COUNT; ++i) {
         assert(p->detection_sum[i] == 2 * (i + 1));
@@ -43,12 +44,12 @@ int main(void)
 
     char text[RECORD_PROFILE_CSV_LINE_CAPACITY];
     assert(record_profile_csv_line(text, sizeof(text), 1, &p->rows[0]) > 0);
-    assert(!strcmp(text, "1,0,1234,25,10,20,30,40,100,125,8,0,400,1,2,3,4,5,6,7,17,25,31,43,2\r\n"));
+    assert(!strcmp(text, "1,0,1234,25,10,20,30,40,107,132,8,0,400,1,2,3,4,5,6,7,17,25,31,43,2,7\r\n"));
     assert(record_profile_csv_line(text, sizeof(text), 2, &p->rows[1]) > 0);
-    assert(!strcmp(text, "2,,1234,25,10,20,90,0,120,145,8,2,600,1,2,3,4,5,6,7,17,25,31,43,2\r\n"));
+    assert(!strcmp(text, "2,,1234,25,10,20,90,0,131,156,8,2,600,1,2,3,4,5,6,7,17,25,31,43,2,11\r\n"));
     unsigned columns = 1;
     for (const char *c = record_profile_csv_header; *c; ++c) if (*c == ',') columns++;
-    assert(columns == 18 + DET_TIME_COUNT && !memcmp(record_profile_csv_header, "\xEF\xBB\xBF", 3));
+    assert(columns == 19 + DET_TIME_COUNT && !memcmp(record_profile_csv_header, "\xEF\xBB\xBF", 3));
     assert(record_profile_csv_line(text, 4, 2, &p->rows[1]) >= 4);
     assert(text[3] == '\0');
 
