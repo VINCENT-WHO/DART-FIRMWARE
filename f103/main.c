@@ -2,6 +2,7 @@
 #include "stm32f1xx.h"
 #include "protocol.h"
 #include "timebase.h"
+#include "control_mode.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -18,10 +19,7 @@ static volatile uint32_t link_rx_count,link_tx_count;
 static volatile uint8_t last_rx[32];
 static volatile unsigned sampling;
 static unsigned accel_ok,gyro_ok,accel_id,gyro_id,pwm_on;
-static uint32_t pulses[4]={1500,1500,1500,1500},last_manual;
-static uint32_t sampling_started;
-/* WATCH 模式允许无限待机；普通 IMU START 仍保留原来的 12 秒保护。 */
-static unsigned watching;
+static f103_control control;
 static uint32_t led_state,led_received;
 static dart_parser parser;
 static uint32_t msg_seq;
@@ -118,31 +116,48 @@ void TIM3_IRQHandler(void){
     packet(DART_IMU,&s,sizeof(s));
     if(TIM3->SR&TIM_SR_UIF)missed_ticks++;
 }
-static void sampling_set(unsigned on){TIM3->CR1=0;sampling=0;if(on&&(accel_ok||gyro_ok)){sequence=missed_ticks=0;TIM3->CNT=0;TIM3->SR=0;sampling_started=ticks;sampling=1;TIM3->CR1=TIM_CR1_CEN;}}
+static unsigned imu_ready(void){return accel_ok&&gyro_ok&&SystemCoreClock==72000000;}
+static void sampling_set(unsigned on){
+    on=on&&imu_ready();if(on==sampling)return;
+    uint32_t irq=__get_PRIMASK();__disable_irq();
+    TIM3->CR1=0;sampling=0;TIM3->CNT=0;TIM3->SR=0;NVIC_ClearPendingIRQ(TIM3_IRQn);
+    if(on){sampling=1;TIM3->CR1=TIM_CR1_CEN;}
+    __set_PRIMASK(irq);
+    /* sequence/missed_ticks自上电累计，H750会话请求不重置流序号。 */
+}
 static void pwm_set(unsigned on){
+    if(on==pwm_on)return;
     if(!on){TIM2->CR1=TIM2->CCER=0;for(unsigned i=0;i<4;i++)pin(GPIOA,i,4);pwm_on=0;return;}
     TIM2->PSC=SystemCoreClock/1000000-1;TIM2->ARR=19999;
     TIM2->CCMR1=TIM_CCMR1_OC1M_1|TIM_CCMR1_OC1M_2|TIM_CCMR1_OC1PE|TIM_CCMR1_OC2M_1|TIM_CCMR1_OC2M_2|TIM_CCMR1_OC2PE;
     TIM2->CCMR2=TIM_CCMR2_OC3M_1|TIM_CCMR2_OC3M_2|TIM_CCMR2_OC3PE|TIM_CCMR2_OC4M_1|TIM_CCMR2_OC4M_2|TIM_CCMR2_OC4PE;
-    volatile uint32_t *cc=&TIM2->CCR1;for(unsigned i=0;i<4;i++){cc[i]=pulses[i];pin(GPIOA,i,11);}
-    TIM2->EGR=TIM_EGR_UG;TIM2->SR=0;TIM2->CCER=TIM_CCER_CC1E|TIM_CCER_CC2E|TIM_CCER_CC3E|TIM_CCER_CC4E;TIM2->CR1=TIM_CR1_ARPE|TIM_CR1_CEN;pwm_on=1;last_manual=ticks;
+    volatile uint32_t *cc=&TIM2->CCR1;for(unsigned i=0;i<4;i++){cc[i]=control.pulses[i];pin(GPIOA,i,11);}
+    TIM2->EGR=TIM_EGR_UG;TIM2->SR=0;TIM2->CCER=TIM_CCER_CC1E|TIM_CCER_CC2E|TIM_CCER_CC3E|TIM_CCER_CC4E;TIM2->CR1=TIM_CR1_ARPE|TIM_CR1_CEN;pwm_on=1;
 }
+static void apply_control(void){pwm_set(control.pwm_requested);sampling_set(control.imu_requested);}
 static void process_link(void){
     while(rx_t!=rx_h){uint8_t b=link_rx[rx_t];rx_t=(rx_t+1)&(LINK_RX_SIZE-1);dart_packet p;if(dart_parse(&parser,b,&p)!=1)continue;
         if(p.type==DART_REPLY){char text[DART_PAYLOAD_MAX+1];memcpy(text,p.data,p.length);text[p.length]=0;report("H7: %s\r\n",text);}
         else if(p.type==DART_COMMAND){char text[DART_PAYLOAD_MAX+1];memcpy(text,p.data,p.length);text[p.length]=0;
-            if(!strcmp(text,"IMU START")||!strcmp(text,"IMU WATCH")){
-                if(accel_ok&&gyro_ok&&SystemCoreClock==72000000&&!pwm_on){
-                    watching=!strcmp(text,"IMU WATCH");sampling_set(1);
-                    link_text(DART_REPLY,watching?"IMU WATCHING":"IMU STARTED");
-                }else link_text(DART_REPLY,"IMU ERROR ID/CONFIG/CLOCK/PWM");
-            }
-            else if(!strcmp(text,"IMU STOP")){sampling_set(0);watching=0;link_text(DART_REPLY,"IMU STOPPED");}
+            const char *response=f103_control_imu(&control,text,imu_ready(),ticks);
+            if(response){apply_control();link_text(DART_REPLY,response);}
+            else if(!strncmp(text,"MODE ",5))link_text(DART_REPLY,"ERR MODE FIXED BY FIRMWARE");
+            else if(!strncmp(text,"PWM ",4))link_text(DART_REPLY,"ERR PC COMMAND ONLY");
             else if(!strncmp(text,"LED ",4)){led_state=(uint32_t)strtoul(text+4,NULL,10);led_received=ticks;}
         }else if(p.type==DART_SYNC&&p.length==4){uint8_t reply[8];memcpy(reply,p.data,4);dart_put32(reply+4,micros());packet(DART_SYNC,reply,8);}
     }
 }
-static void status(void){report("DART F103 v=2.0 clk=%lu aid=%02X gid=%02X acc=%u gyro=%u active=%u samples=%lu late=%lu txdrop=%lu spierr=%lu uarterr=%lu crc=%lu pwm=%u\r\n",(unsigned long)SystemCoreClock,accel_id,gyro_id,accel_ok,gyro_ok,sampling,(unsigned long)sequence,(unsigned long)missed_ticks,(unsigned long)tx_drops,(unsigned long)spi_errors,(unsigned long)uart_errors,(unsigned long)parser.errors,pwm_on);}
+static void status(void){
+    report("DART F103 v=" F103_FIRMWARE_VERSION " mode=%s mode_id=%u active=%u pwm=%u watch=%u\r\n",
+        control.mode==F103_MODE_NORMAL?"NORMAL":"DEBUG",(unsigned)control.mode,sampling,pwm_on,control.watching);
+    report("IMU clk=%lu aid=%02X gid=%02X acc=%u gyro=%u samples=%lu late=%lu\r\n",
+        (unsigned long)SystemCoreClock,accel_id,gyro_id,accel_ok,gyro_ok,(unsigned long)sequence,(unsigned long)missed_ticks);
+    report("ERR txdrop=%lu spierr=%lu uarterr=%lu crc=%lu\r\n",(unsigned long)tx_drops,
+        (unsigned long)spi_errors,(unsigned long)uart_errors,(unsigned long)parser.errors);
+    report("PWM us=%lu,%lu,%lu,%lu timeout_ms=%u\r\n",(unsigned long)control.pulses[0],
+        (unsigned long)control.pulses[1],(unsigned long)control.pulses[2],(unsigned long)control.pulses[3],
+        control.mode==F103_MODE_DEBUG?3000u:0u);
+}
 
 static void update_led(void){
     /* 共阳 RGB 低电平点亮。PA5 为绿灯；其它支路颜色以实物为准。
@@ -165,21 +180,32 @@ static void command(char *s){
     unsigned ch,us;char tail;
     if(!strncmp(s,"PING ",5))report("PONG %s\r\n",s+5);
     else if(!strcmp(s,"STATUS"))status();
+    else if(!strncmp(s,"MODE ",5))pc_write("ERR MODE FIXED BY FIRMWARE\r\n");
     else if(!strcmp(s,"LINK DIAG")){report("LINK tx=%lu rx=%lu crc=%lu sr=%08lX brr=%lu\r\n",(unsigned long)link_tx_count,(unsigned long)link_rx_count,(unsigned long)parser.errors,(unsigned long)USART1->SR,(unsigned long)USART1->BRR);char hex[65];unsigned count=link_rx_count<32?link_rx_count:32;for(unsigned i=0;i<count;i++)snprintf(hex+i*2,3,"%02X",last_rx[(link_rx_count-count+i)&31]);hex[count*2]=0;report("LINK LAST %s\r\n",hex);}
-    else if(!strcmp(s,"PWM OFF")){pwm_set(0);pc_write("OK PWM OFF\r\n");}
-    else if(!strcmp(s,"PWM ON")){if(sampling)pc_write("ERR RECORDING\r\n");else{pwm_set(1);pc_write("OK PWM ON timeout=3000ms\r\n");}}
-    else if(!strcmp(s,"PWM KEEP")){last_manual=ticks;pc_write("OK KEEP\r\n");}
-    else if(sscanf(s,"PWM %u %u %c",&ch,&us,&tail)==2&&ch>=1&&ch<=4&&us>=1000&&us<=2000){pulses[ch-1]=us;(&TIM2->CCR1)[ch-1]=us;last_manual=ticks;pc_write("OK PWM SET\r\n");}
+    else if(!strcmp(s,"PWM OFF")||!strcmp(s,"PWM ON")||!strcmp(s,"PWM KEEP")){
+        unsigned keep=!strcmp(s,"PWM KEEP"),on=keep?control.pwm_requested:!strcmp(s,"PWM ON");
+        if(!f103_control_pwm(&control,on,ticks))pc_write("ERR DEBUG MODE REQUIRED\r\n");
+        else{apply_control();pc_write(keep?"OK KEEP\r\n":on?"OK PWM ON timeout=3000ms\r\n":"OK PWM OFF\r\n");}
+    }
+    else if(sscanf(s,"PWM %u %u %c",&ch,&us,&tail)==2&&ch>=1&&ch<=4&&us>=1000&&us<=2000){
+        if(!f103_control_pulse(&control,ch,us,ticks))pc_write("ERR DEBUG MODE REQUIRED\r\n");
+        else{(&TIM2->CCR1)[ch-1]=us;pc_write("OK PWM SET\r\n");}
+    }
+    else if(!strcmp(s,"IMU START")||!strcmp(s,"IMU WATCH")||!strcmp(s,"IMU STOP")){
+        const char *response=f103_control_imu(&control,s,imu_ready(),ticks);apply_control();report("%s\r\n",response);
+    }
     else if(!strncmp(s,"H7 ",3)&&strlen(s+3)<=DART_PAYLOAD_MAX){link_text(DART_COMMAND,s+3);pc_write("OK H7 TX\r\n");}
-    else pc_write("COMMANDS PING STATUS H7 STATUS/H7 START <6HEX> 10/H7 STOP PWM ON/OFF/KEEP/<ch> <us>\r\n");
+    else pc_write("COMMANDS STATUS IMU START/WATCH/STOP PWM ON/OFF/KEEP/<ch> <us> H7 <command>\r\n");
 }
 int main(void){
-    clock_init();board_init();imu_init();pc_write("BOOT Dart AutoRecord F103 2.0; PWM OFF; link=921600; gyro=1000Hz accel=1600Hz\r\n");status();
+    clock_init();board_init();f103_control_init(&control,F103_BOOT_MODE);imu_init();apply_control();
+    pc_write("BOOT Dart F103 " F103_FIRMWARE_VERSION "; link=921600; PWM/IMU mode fixed by firmware\r\n");status();
     char line[96];unsigned n=0,discard=0;uint32_t heartbeat=0;
     for(;;){process_link();while(pc_t!=pc_h){char c=(char)pc_rx[pc_t];pc_t=(pc_t+1)&255;if(c=='\r')continue;if(c=='\n'){if(!discard){line[n]=0;command(line);}n=discard=0;}else if(n<sizeof(line)-1&&!discard)line[n++]=c;else discard=1;}
-        if(pwm_on&&(uint32_t)(ticks-last_manual)>3000){pwm_set(0);pc_write("EVENT PWM TIMEOUT\r\n");}
+        unsigned expired=f103_control_poll(&control,ticks);apply_control();
+        if(expired&F103_PWM_EXPIRED)pc_write("EVENT PWM TIMEOUT\r\n");
         update_led();
-        if(sampling&&!watching&&(uint32_t)(ticks-sampling_started)>12000){sampling_set(0);link_text(DART_REPLY,"IMU STOPPED");pc_write("EVENT IMU SESSION TIMEOUT\r\n");}
+        if(expired&F103_IMU_EXPIRED){link_text(DART_REPLY,"IMU STOPPED");pc_write("EVENT IMU SESSION TIMEOUT\r\n");}
         if((uint32_t)(ticks-heartbeat)>1000){heartbeat=ticks;link_text(DART_REPLY,"F103 ALIVE");}
     }
 }

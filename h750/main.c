@@ -4,6 +4,7 @@
 #include "stm32h7xx_hal.h"
 #include "protocol.h"
 #include "timebase.h"
+#include "imu_session.h"
 #include "auto_record.h"
 #include "avi.h"
 #include "camera_perf.h"
@@ -22,7 +23,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DART_RECORDING_VERSION "2.4.0-green-ekf"
+#define DART_RECORDING_VERSION "2.4.1-green-ekf"
 
 extern int board_clock_start(void);
 extern int board_storage_start(void);
@@ -43,9 +44,10 @@ static imu_entry pre_trigger[DART_AUTO_PRE_SAMPLES] __attribute__((section(".cam
 /* JPEG输出59392字节，与相机缓冲和单张绿色掩膜共用AXI。
  * 硬件编码的条带重排缓冲放DTCM，不增加AXI或D2的占用。 */
 static uint8_t jpeg_out[DART_JPEG_OUT_MAX] __attribute__((section(".camera_buffer"), aligned(32)));
-static volatile unsigned imu_head, imu_tail, accept_imu;
+static volatile unsigned imu_head, imu_tail;
+static dart_imu_session imu_session;
 static dart_packet replies[8];
-static volatile unsigned reply_head, reply_tail, remote_started, remote_stopped;
+static volatile unsigned reply_head, reply_tail;
 static FATFS fs;
 static FIL video, logfile, csvfile, detfile;
 static unsigned video_open, log_open, csv_open, det_open, mounted, failed, camera_mode, camera_running;
@@ -152,7 +154,9 @@ void USART3_IRQHandler(void)
     if (!(flags & USART_ISR_RXNE_RXFNE)) return;
     dart_packet p;
     if (dart_parse(&parser, (uint8_t)USART3->RDR, &p) != 1) return;
-    if (p.type == DART_IMU && p.length == sizeof(dart_imu) && accept_imu) {
+    if (p.type == DART_IMU) {
+        /* F103正常模式持续发送；窗口外直接丢弃，不挤占命令回复队列。 */
+        if (!dart_imu_session_accepts(&imu_session, &p)) return;
         unsigned next = (imu_head + 1) & 1023;
         if (next == imu_tail) { imu_overflows++; return; }
         last_imu_rx = board_micros(); imu_queue[imu_head].rx_us = last_imu_rx;
@@ -162,10 +166,7 @@ void USART3_IRQHandler(void)
             sync_ready_time = board_micros(); sync_f1_time = dart_get32(p.data + 4); sync_ready = 1;
         }
     } else {
-        if (p.type == DART_REPLY &&
-            ((p.length == 11 && !memcmp(p.data, "IMU STARTED", 11)) ||
-             (p.length == 12 && !memcmp(p.data, "IMU WATCHING", 12)))) remote_started = 1;
-        if (p.type == DART_REPLY && p.length == 11 && !memcmp(p.data, "IMU STOPPED", 11)) remote_stopped = 1;
+        dart_imu_session_reply(&imu_session, &p);
         unsigned next = (reply_head + 1) & 7;
         if (next == reply_tail) { reply_overflows++; return; }
         replies[reply_head] = p; __DMB(); reply_head = next;
@@ -330,10 +331,12 @@ profile_complete:
 }
 static void stop_stream(void)
 {
+    /* 先关闭本地窗口，F103正常模式的PWM/IMU继续运行。
+     * 调试模式和旧版F103仍回复STOPPED；新版正常模式回复CONTINUOUS。 */
+    dart_imu_session_end(&imu_session);
     wire_send(DART_COMMAND, "IMU STOP", 8);
     uint32_t begin = board_micros();
-    while (!remote_stopped && (uint32_t)(board_micros() - begin) < 30000) {}
-    accept_imu = 0;
+    while (!imu_session.released && (uint32_t)(board_micros() - begin) < 30000) {}
 }
 static void release_card(void)
 {
@@ -716,8 +719,8 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
     log_event("gyro=1000Hz/2000dps accel=1600Hz/24g image=320x240/YUV422 fps=measured");
     log_event("CONFIG threshold_mg=2000 hold_us=20000 duration_us=10000000 pre=200");
     if (camera_mode) { step = "CAMSTART"; if ((code = camera_start()) != 0) goto fail; camera_running = 1; }
-    remote_started = remote_stopped = 0; imu_head = imu_tail = 0;
-    last_imu_rx = last_good_frame = prepare_us = board_micros(); accept_imu = 1;
+    imu_head = imu_tail = 0;
+    last_imu_rx = last_good_frame = prepare_us = board_micros(); dart_imu_session_begin(&imu_session);
     wire_send(DART_COMMAND, "IMU WATCH", 9); sync_request();
     reply("SESSION PREPARE auto=%u id=%06lX", automatic, (unsigned long)session_token);
     return;
@@ -819,7 +822,7 @@ int main(void)
                 uint8_t pair[12]; dart_put32(pair, sync_sent); dart_put32(pair + 4, sync_f1_time); dart_put32(pair + 8, sync_ready_time);
                 log_packet(18, sync_ready_time, pair, 12); sync_ready = 0; sync_pending = 0;
             }
-            if (state == PREPARING && remote_started && pre_count && (!camera_mode || camera_frames)) {
+            if (state == PREPARING && imu_session.started && pre_count && (!camera_mode || camera_frames)) {
                 if (automatic) { state = ARMED; memset(&trigger, 0, sizeof(trigger)); reply("AUTO READY threshold=2000mg hold=20ms folder=%s", directory); send_led(); }
                 else { unsigned latest = (pre_head + DART_AUTO_PRE_SAMPLES - 1) % DART_AUTO_PRE_SAMPLES; begin_recording(&pre_trigger[latest]); }
             }

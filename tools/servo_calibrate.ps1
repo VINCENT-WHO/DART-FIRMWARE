@@ -45,7 +45,7 @@ else {
 function Send-CalibrationCommand([string]$Command, [string]$Expected) {
     if ($Simulate) {
         if ($Command -eq 'STATUS') {
-            return 'DART F103 v=2.0 active=0 pwm=0'
+            return 'DART F103 v=2.1.0-debug mode=DEBUG mode_id=1 active=0 pwm=0 watch=0'
         }
         if ($Command -eq 'H7 STATUS') {
             return 'H7: DART H750 v=2.0 state=DISARMED sd=1 frames=0 imu=0'
@@ -89,23 +89,28 @@ try {
     $hello = 'CAL' + [Guid]::NewGuid().ToString('N').Substring(0, 6)
     $null = Send-CalibrationCommand "PING $hello" "PONG $hello"
     $status = Send-CalibrationCommand 'STATUS' 'DART F103'
-    if ($status -notmatch 'v=2\.0(?:\s|$)') {
-        throw '不是本工具对应的 F103 v2.0 固件，停止。'
+    $dualMode = $status -match 'v=2\.1\.0-(?:normal|debug)(?:\s|$)'
+    if (-not $dualMode -and $status -notmatch 'v=2\.0(?:\s|$)') {
+        throw '不是本工具对应的 F103 v2.0 或 v2.1.0-normal/debug 固件，停止。'
     }
 
     if ($CheckOnly) {
         Write-Host "F103状态：$status"
         $h7Status = Send-CalibrationCommand 'H7 STATUS' 'H7: DART H750'
         Write-Host "H750状态：$h7Status"
-        Write-Host '连接检查完成：没有发送PWM或启停采集命令，没有让舵机动作。' -ForegroundColor Green
+        Write-Host '连接检查完成：未改变模式、PWM输出或采样状态。' -ForegroundColor Green
         return
     }
 
-    # 握手和型号确认完成后，才允许改变PWM；预检或连接失败不发送清理命令。
+    if ($dualMode -and $status -notmatch '(?:^|\s)mode=DEBUG(?:\s|$)') {
+        throw '当前是持续运行的正常固件；手动标定需使用DART_F103_DEBUG_MODE=ON构建的调试固件。未发送控制命令。'
+    }
+    # 握手、型号和调试模式确认后，才允许改变PWM；预检失败不发送清理命令。
     $pwmCleanupNeeded = $true
-    $null = Send-CalibrationCommand 'PWM OFF' 'OK PWM OFF'
     $null = Send-CalibrationCommand 'H7 AUTO OFF' 'OK H7 TX'
     Start-Sleep -Milliseconds 800
+    $null = Send-CalibrationCommand 'PWM OFF' 'OK PWM OFF'
+    if ($dualMode) { $null = Send-CalibrationCommand 'IMU STOP' 'IMU STOPPED' }
     $status = Send-CalibrationCommand 'STATUS' 'DART F103'
     if ($status -notmatch '(?:^|\s)active=0(?:\s|$)' -or
         $status -notmatch '(?:^|\s)pwm=0(?:\s|$)') {
@@ -125,7 +130,7 @@ try {
     }
     Write-Host '读数需由量角器/照片得到，本工具不能读取真实舵角。'
 
-    # 固件3秒没有新命令会关闭输出；每500ms续期，不改变目标脉宽。
+    # 调试模式3秒没有PWM续期会关闭输出；每500ms续期，不改变目标脉宽。
     $holdTimer = [Diagnostics.Stopwatch]::StartNew()
     $nextKeepMs = 0
     while ($holdTimer.Elapsed.TotalSeconds -lt $HoldSeconds) {
@@ -156,4 +161,5 @@ finally {
 }
 
 Write-Host '本次测点结束。正常收到OK PWM OFF才表示已确认关闭输出；它不等于舵面回到0度。'
+if ($dualMode) { Write-Host '控制板保持调试模式。持续运行需烧录正常固件；串口命令不能切换模式。' }
 }

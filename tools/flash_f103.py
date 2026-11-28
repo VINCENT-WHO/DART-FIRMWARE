@@ -6,7 +6,8 @@ ROOT=Path(__file__).resolve().parents[1]
 def tclpath(p):return '{'+str(p.resolve()).replace('\\','/')+'}'
 def main():
     p=argparse.ArgumentParser();p.add_argument('--openocd',default='openocd');p.add_argument('--scripts',type=Path)
-    p.add_argument('--program',action='store_true');p.add_argument('--restore',type=Path);a=p.parse_args()
+    p.add_argument('--program',action='store_true');p.add_argument('--restore',type=Path)
+    p.add_argument('--build-dir',type=Path,default=ROOT/'build/native');a=p.parse_args()
     if a.program and a.restore:p.error('Choose program or restore')
     out=ROOT.parent/'固件备份'/('f103_'+datetime.now().strftime('%Y%m%d_%H%M%S'));out.mkdir(parents=True)
     cfg=ROOT/'tools/f103_openocd.cfg';report={'target':'STM32F103C8T6','backup_verified':False,'programmed':False,'readback_verified':False}
@@ -26,7 +27,7 @@ def main():
             data=a.restore.read_bytes()
             if len(data)!=65536:raise RuntimeError('Restore requires exact64KiB backup')
         else:
-            data=(ROOT/'build/native/f103/dart_f103.bin').read_bytes();m=json.loads((ROOT/'build/native/f103/manifest.json').read_text())
+            data=(a.build_dir/'f103/dart_f103.bin').read_bytes();m=json.loads((a.build_dir/'f103/manifest.json').read_text())
             if m['target']!='STM32F103C8T6' or hashlib.sha256(data).hexdigest()!=m['sha256']:raise RuntimeError('Candidate mismatch')
             if not 256<len(data)<=65536:raise RuntimeError('Candidate size exceeds F103 flash')
             data=data+b'\xff'*(65536-len(data))

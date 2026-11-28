@@ -13,6 +13,8 @@ add_executable(dart_f103 f103/main.c common/protocol.c
     ${V}/cmsis-device-f1/Source/Templates/gcc/startup_stm32f103xb.s)
 target_include_directories(dart_f103 PRIVATE common ${V}/cmsis-device-f1/Include ${V}/CMSIS_5/Core/Include)
 target_compile_definitions(dart_f103 PRIVATE STM32F103xB HSE_VALUE=12000000U)
+option(DART_F103_DEBUG_MODE "Build F103 in manual debug mode instead of continuous normal mode" OFF)
+target_compile_definitions(dart_f103 PRIVATE DART_F103_DEBUG_MODE=$<BOOL:${DART_F103_DEBUG_MODE}>)
 
 set(H7_HAL_SOURCES)
 foreach(name hal hal_cortex hal_dma hal_dma_ex hal_pcd hal_pcd_ex ll_usb hal_dcmi hal_exti
@@ -47,12 +49,16 @@ foreach(chip f103 h750)
         set(cpu cortex-m3)
         set(device STM32F103C8T6)
         set(flash_limit 65536)
-        set(firmware_version "2.0.0")
+        if(DART_F103_DEBUG_MODE)
+            set(firmware_version "2.1.0-debug")
+        else()
+            set(firmware_version "2.1.0-normal")
+        endif()
     else()
         set(cpu cortex-m7)
         set(device STM32H750VBT6)
         set(flash_limit 131072)
-        set(firmware_version "2.4.0-green-ekf")
+        set(firmware_version "2.4.1-green-ekf")
     endif()
     target_compile_options(${target} PRIVATE -mcpu=${cpu} -mthumb -mfloat-abi=soft
         -ffunction-sections -fdata-sections -fno-common -gdwarf-4 -Wall -Wextra -Werror

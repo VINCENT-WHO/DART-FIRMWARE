@@ -2,14 +2,14 @@
 
 制导飞镖镖体固件：F103 负责读取 IMU，H750 负责相机、机载绿灯识别和 TF 卡记录。上电后待机，检测到发射加速度后自动记录约 10 秒，落地后用 USB 读卡器取出文件。
 
-当前只采集数据，不做姿态控制。
+正常固件上电后F103持续输出四路50 Hz、1500 μs舵机PWM，并持续采样、发送IMU；H750独立决定是否记录。当前没有姿态闭环。调试模式需单独构建调试固件，不由电脑命令切换。模式标志、命令发送方和测试说明见 [F103控制板模式与通信](docs/F103控制板模式与通信.md)。
 
 ## 功能
 
 | 芯片 | 版本 | 职责 |
 | --- | --- | --- |
-| STM32F103C8T6 | 2.0.0 | 读取 BMI088（±24g 量程），把原始数据发给 H750；转发电脑串口命令；四路舵机 PWM |
-| STM32H750VBT6 | 2.4.0-green-ekf | OV5640采集320×240图像；ROI绿灯检测及六维EKF记录；硬件JPEG编码；保存TF卡 |
+| STM32F103C8T6 | 2.1.0-normal / 2.1.0-debug | 正常模式持续PWM和BMI088采样发送；独立调试固件支持手动测试；转发电脑命令 |
+| STM32H750VBT6 | 2.4.1-green-ekf | OV5640采集320×240图像；ROI绿灯检测及六维EKF记录；JPEG/TF记录；兼容F103常时IMU数据流 |
 
 一次记录的流程：
 
@@ -60,14 +60,14 @@ cmake --preset dart
 cmake --build --preset dart
 ```
 
-产物在 `build/native/`：
+使用上述预设时产物在 `build/native/`；本次普通固件验证产物在 `build/f103-dual-mode/`，调试F103在 `build/f103-debug-mode/`，以各目录manifest为准：
 
 | 芯片 | 文件 | 大小 | Flash 上限 |
 | --- | --- | ---: | ---: |
-| F103 | `f103/dart_f103.bin`、`.hex`、`.elf` | 12224 字节 | 64KB |
-| H750 | `h750/dart_h750.bin`、`.hex`、`.elf` | 104464 字节 | 128KB |
+| F103 | `f103/dart_f103.bin`、`.hex`、`.elf` | 见manifest | 64KB |
+| H750 | `h750/dart_h750.bin`、`.hex`、`.elf` | 见manifest | 128KB |
 
-同目录下的 `manifest.json` 记录版本号、大小和校验值。H750 的 Flash 余量约 26KB，加功能时要留意。
+同目录下的 `manifest.json` 记录版本号、大小和校验值。默认构建正常模式；调试F103需在独立构建目录配置`-DDART_F103_DEBUG_MODE=ON`，与编译优化级别Debug无关。
 
 编译时会出现几条 `_close is not implemented` 之类的链接警告，来自 newlib 的系统调用桩，可以忽略。
 
@@ -82,7 +82,7 @@ cmake --build --preset dart
 数据线接到 **F103/DartDAP 方向**。需要 OpenOCD：
 
 ```powershell
-python tools/flash_f103.py --openocd <openocd可执行文件> --scripts <openocd的scripts目录> --program
+python tools/flash_f103.py --openocd <openocd可执行文件> --scripts <openocd的scripts目录> --build-dir build/f103-dual-mode --program
 ```
 
 ### H750

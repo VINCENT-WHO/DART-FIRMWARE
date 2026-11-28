@@ -13,6 +13,13 @@ subprocess.run([str(exe),str(out/'avi_header.bin')],check=True)
 auto_exe=out/('test_auto_record.exe' if os.name=='nt' else 'test_auto_record')
 subprocess.run([cc,'-std=c11','-Wall','-Wextra','-Werror','-I'+str(ROOT/'common'),str(ROOT/'tests/test_auto_record.c'),str(ROOT/'common/auto_record.c'),'-o',str(auto_exe)],check=True)
 subprocess.run([str(auto_exe)],check=True)
+for debug_mode in [0,1]:
+    mode_exe=out/(f'test_f103_mode_{debug_mode}'+('.exe' if os.name=='nt' else ''))
+    subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
+        f'-DDART_F103_DEBUG_MODE={debug_mode}',
+        '-I'+str(ROOT/'common'),'-I'+str(ROOT/'f103'),str(ROOT/'tests/test_f103_mode.c'),
+        str(ROOT/'common/protocol.c'),'-o',str(mode_exe)],check=True)
+    subprocess.run([str(mode_exe)],check=True)
 exposure_exe=out/('test_camera_exposure.exe' if os.name=='nt' else 'test_camera_exposure')
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-I'+str(ROOT/'h750'),
     str(ROOT/'tests/test_camera_exposure.c'),'-o',str(exposure_exe)],check=True)
@@ -80,5 +87,6 @@ except ImportError:print('Pillow/OpenCV unavailable: skipped generated JPEG/AVI 
 report={'result':'PASS','c_randomized_cases':10000,'python_wire_lengths':81,'crc_corruption_and_truncated_tail':'PASS','timestamp_wrap_and_sync':'PASS','imu_gap_detection':'PASS','generated_avi_decode':avi_result,'record_profile_capacity_errors_csv_reset':'PASS','rgb_detection_area_centroid_input_unchanged_and_timing':'PASS','fixed_exposure_register_logic':'PASS','sliding_median_immutable_reference_and_guards':'PASS','hardware':'NOT RUN'}
 report['roi_bounds_halo_motion_reacquire_reset']='PASS'
 report['green_ekf_model_covariance_time_missing_gate_log']='PASS'
+report['f103_modes_pwm_imu_timeouts_and_h750_continuous_stream_session']='PASS'
 (out/'validation.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
 print(json.dumps(report,indent=2))
