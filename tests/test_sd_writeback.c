@@ -15,6 +15,7 @@ static uint8_t dma_snapshot[32*512];
 static uint32_t us,step_us=20,dma_delay=1000,card_delay=1000,start_us,busy_us;
 static unsigned active,is_write,advancing,card_busy,usb_host,fail_start,fail_dma,fail_card,hang_dma,hang_card;
 static unsigned aborts,transfers,writes,reads;
+static unsigned irq_after_sample,stop_error_on_complete;
 static uint8_t *dma_buffer;
 static uint32_t dma_lba,dma_count;
 static void advance(uint32_t delta)
@@ -30,6 +31,8 @@ static void advance(uint32_t delta)
             assert(!memcmp(dma_buffer,dma_snapshot,dma_count*512));
             memcpy(card+dma_lba*512,dma_buffer,dma_count*512);
             card_busy=1;busy_us=us;
+            /* ST HAL在多块CMD12失败时先报Error，再报TxCplt。 */
+            if(stop_error_on_complete)HAL_SD_ErrorCallback(&hsd1);
             HAL_SD_TxCpltCallback(&hsd1);
         } else {
             memcpy(dma_buffer,card+dma_lba*512,dma_count*512);
@@ -39,7 +42,17 @@ static void advance(uint32_t delta)
     if(card_busy && !hang_card && (uint32_t)(us-busy_us)>=card_delay)card_busy=0;
     advancing=0;
 }
-uint32_t board_micros(void) { if(!advancing)advance(step_us);return us; }
+uint32_t board_micros(void)
+{
+    if(!advancing)advance(step_us);
+    uint32_t sampled=us;
+    /* 模拟真实board_micros采样后恢复中断，完成IRQ抢在函数返回前执行。 */
+    if(!advancing && irq_after_sample) {
+        irq_after_sample=0;
+        advance(dma_delay);
+    }
+    return sampled;
+}
 uint32_t HAL_GetTick(void) { advance(step_us);return us/1000; }
 DWORD get_fattime(void) { return (46u<<25)|(1u<<21)|(1u<<16); }
 int usb_tf_host_active(void) { return (int)usb_host; }
@@ -163,6 +176,42 @@ static void partition_case(void)
     assert(disk_read(0,readback,SECTORS-32,1)==RES_PARERR);
     assert(fs_storage_end()==0);puts("PASS: partition translation and range overflow protection");
 }
+static void completion_race_case(unsigned wrap)
+{
+    setup();
+    if(wrap)us=UINT32_MAX-500u;
+    write_pattern(40,4,17);
+    assert(active);
+    irq_after_sample=1;
+    assert(fs_storage_poll()==0); /* 过去的时间样本不能减去IRQ里的未来完成时间。 */
+    sync_and_check();
+    assert(!fs_storage_stats()->error_stage && fs_storage_stats()->card_busy_max_us<10000);
+    assert(fs_storage_end()==0);
+    puts("PASS: completion IRQ after clock sampling, including microsecond wrap");
+}
+static void stop_error_race_case(void)
+{
+    setup();write_pattern(40,4,17);
+    stop_error_on_complete=1;card_delay=0;step_us=dma_delay;
+    /* 在poll开头检查错误后、读完成标志前，IRQ同时发布错误和完成。 */
+    assert(fs_storage_poll()==-1);
+    assert(fs_storage_stats()->error_stage==2);
+    assert(fs_storage_stats()->queued_sectors==4 && !fs_storage_stats()->completed_sectors);
+    assert(fs_storage_end()==-1 && aborts==1);
+    puts("PASS: HAL stop-command error takes priority over completion in the same IRQ");
+}
+static void sync_fault_case(unsigned write,unsigned timeout)
+{
+    setup();assert(fs_storage_end()==0);fill(4,17);
+    if(timeout)hang_dma=1;else fail_dma=1;
+    step_us=1000;
+    DRESULT result=write ? disk_write(0,source,40,4) : disk_read(0,readback,40,4);
+    assert(result==RES_ERROR);
+    assert(fs_disk_last_error==(0x12u|(timeout ? HAL_SD_ERROR_TIMEOUT : 0u)));
+    /* 同步准备阶段超时也必须停止IDMA，清理不能复用仍在途的bounce。 */
+    assert(!active && aborts==1);
+    puts("PASS: synchronous preparation I/O retains cause and aborts failed DMA");
+}
 static void fatfs_case(void)
 {
     /* 最小FAT12内存镜像：2048扇区，保留1/FAT6/root4，1扇区每簇。 */
@@ -209,6 +258,13 @@ int main(int argc,char **argv)
     if(argc==1)normal_cases();
     else if(!strcmp(argv[1],"partition"))partition_case();
     else if(!strcmp(argv[1],"fatfs"))fatfs_case();
+    else if(!strcmp(argv[1],"completion_race"))completion_race_case(0);
+    else if(!strcmp(argv[1],"completion_wrap"))completion_race_case(1);
+    else if(!strcmp(argv[1],"stop_error_race"))stop_error_race_case();
+    else if(!strcmp(argv[1],"sync_read_timeout"))sync_fault_case(0,1);
+    else if(!strcmp(argv[1],"sync_write_timeout"))sync_fault_case(1,1);
+    else if(!strcmp(argv[1],"sync_read_error"))sync_fault_case(0,0);
+    else if(!strcmp(argv[1],"sync_write_error"))sync_fault_case(1,0);
     else faults(argv[1]);
     return 0;
 }

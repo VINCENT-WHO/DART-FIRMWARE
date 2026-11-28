@@ -68,10 +68,17 @@ int fs_storage_poll(void)
                 return storage_fail(3,HAL_SD_ERROR_TIMEOUT);
             return 0;
         }
+        /* IRQ可能在本轮开头检查dma_failed/采样now之后才运行。
+         * ST HAL的CMD12失败还会先报Error、随后报TxCplt，必须以错误为准。 */
+        __DMB();
+        if (dma_failed) return storage_fail(2,0);
         uint32_t elapsed = dma_done_us-phase_start_us;
         write_stats.dma_us += elapsed;
         if (elapsed > write_stats.dma_max_us) write_stats.dma_max_us = elapsed;
         phase_start_us = dma_done_us;
+        /* 观察到完成后重新取时：旧now可能早于dma_done_us，无符号相减
+         * 会下溢成约4294秒，导致正常传输被立即判为5秒卡忙超时。 */
+        now = board_micros();
         last_card_poll_us = now-1000u;
         store_state = STORE_CARD;
     }
@@ -195,7 +202,13 @@ static DRESULT transfer_dma(BYTE *data,LBA_t sector,UINT count,unsigned write) {
         HAL_StatusTypeDef r=write?HAL_SD_WriteBlocks_DMA(&hsd1,sd_bounce,sector,n):HAL_SD_ReadBlocks_DMA(&hsd1,sd_bounce,sector,n);
         uint32_t t=HAL_GetTick();
         if(r==HAL_OK)while(!dma_done&&!dma_failed&&HAL_GetTick()-t<5000U){}
-        if(r!=HAL_OK||dma_failed||!dma_done) {fs_disk_last_error=HAL_SD_GetError(&hsd1)|HAL_SD_ERROR_TIMEOUT;return RES_ERROR;}
+        if(r!=HAL_OK||dma_failed||!dma_done) {
+            uint32_t timeout = r==HAL_TIMEOUT || (r==HAL_OK && !dma_failed && !dma_done);
+            fs_disk_last_error=HAL_SD_GetError(&hsd1)|(timeout ? HAL_SD_ERROR_TIMEOUT : 0u);
+            /* 先保存原因，再终止IDMA；失败清理不能复用仍在途的bounce。 */
+            (void)HAL_SD_Abort(&hsd1);
+            return RES_ERROR;
+        }
         if(wait_transfer()!=RES_OK)return RES_ERROR;
         if(!write&&data!=sd_bounce)memcpy(data,sd_bounce,n*512U);
         sector+=n;count-=n;data+=n*512U;
@@ -301,10 +314,8 @@ DRESULT disk_read(BYTE drive, BYTE *buffer, LBA_t sector, UINT count)
     if(cache_count)write_stats.read_flushes++;
     if(storage_drain())return RES_ERROR;
     if (wait_transfer() != RES_OK) return RES_ERROR;
-    if (transfer_dma(buffer,sector+part_offset,count,0) != RES_OK) {
-        fs_disk_last_error = HAL_SD_GetError(&hsd1);
-        return RES_ERROR;
-    }
+    /* transfer_dma已保存软件超时位，不能用HAL错误覆盖。 */
+    if (transfer_dma(buffer,sector+part_offset,count,0) != RES_OK) return RES_ERROR;
     ++fs_disk_reads; fs_disk_read_sectors += count;
     return wait_transfer();
 }
@@ -326,10 +337,7 @@ DRESULT disk_write(BYTE drive, const BYTE *buffer, LBA_t sector, UINT count)
         return result;
     }
     if (wait_transfer() != RES_OK) return RES_ERROR;
-    if (transfer_dma((BYTE *)buffer,sector+part_offset,count,1) != RES_OK) {
-        fs_disk_last_error = HAL_SD_GetError(&hsd1);
-        return RES_ERROR;
-    }
+    if (transfer_dma((BYTE *)buffer,sector+part_offset,count,1) != RES_OK) return RES_ERROR;
     ++fs_disk_writes; fs_disk_write_sectors += count;
     return wait_transfer();
 }

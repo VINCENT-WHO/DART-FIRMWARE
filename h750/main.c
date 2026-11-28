@@ -21,7 +21,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define DART_RECORDING_VERSION "2.3.0-writeback"
+#define DART_RECORDING_VERSION "2.3.1-writeback-fix"
 
 extern int board_clock_start(void);
 extern int board_storage_start(void);
@@ -78,6 +78,12 @@ static volatile unsigned sync_ready;
 static unsigned sync_pending;
 static volatile uint32_t last_imu_rx;
 static uint32_t last_good_frame, last_led_sent;
+/* 清理会继续调用FatFs/HAL，先保存首次失败，STATUS可在红灯后补查。 */
+static struct {
+    const char *step;
+    int code;
+    uint32_t sd_error, sd_stage, sd_pending, imu_started, imu_pre, camera_frames;
+} last_failure;
 
 void _init(void) {} void _fini(void) {}
 void SysTick_Handler(void) { HAL_IncTick(); }
@@ -110,6 +116,31 @@ static void reply(const char *fmt, ...)
     char text[DART_PAYLOAD_MAX + 1]; va_list args;
     va_start(args, fmt); vsnprintf(text, sizeof(text), fmt, args); va_end(args);
     wire_send(DART_REPLY, text, (unsigned)strlen(text));
+}
+static void remember_failure(const char *step, int code)
+{
+    if (last_failure.step) return;
+    const fs_writeback_stats *s = fs_storage_stats();
+    last_failure.step = step; last_failure.code = code;
+    last_failure.sd_error = fs_disk_last_error;
+    last_failure.sd_stage = s->error_stage; last_failure.sd_pending = s->queued_sectors;
+    last_failure.imu_started = remote_started; last_failure.imu_pre = pre_count;
+    last_failure.camera_frames = camera_frames;
+}
+static void report_storage(void)
+{
+    const fs_writeback_stats *s = fs_storage_stats();
+    /* 拆包，避免80字节协议上限截掉最关键的错误码。 */
+    reply("SD CACHE pending=%lu peak=%lu full=%lu", (unsigned long)s->queued_sectors,
+          (unsigned long)s->peak_sectors, (unsigned long)s->full_waits);
+    reply("SD ERROR stage=%lu hal=%08lX", (unsigned long)s->error_stage,
+          (unsigned long)fs_disk_last_error);
+    if (!last_failure.step) return;
+    reply("LAST ERR step=%s code=%d", last_failure.step, last_failure.code);
+    reply("LAST SD stage=%lu hal=%08lX pending=%lu", (unsigned long)last_failure.sd_stage,
+          (unsigned long)last_failure.sd_error, (unsigned long)last_failure.sd_pending);
+    reply("LAST READY imu_started=%lu pre=%lu frames=%lu", (unsigned long)last_failure.imu_started,
+          (unsigned long)last_failure.imu_pre, (unsigned long)last_failure.camera_frames);
 }
 void bench_puts(const char *s)
 {
@@ -606,10 +637,7 @@ static void close_session(void)
     reply("SESSION ERR gaps=%lu qdrop=%lu crc=%lu uart=%lu write_ms=%lu",
           (unsigned long)imu_gaps, (unsigned long)(imu_overflows - session_imu_overflows),
           (unsigned long)(parser.errors - session_crc_errors), (unsigned long)(uart_errors - session_uart_errors), (unsigned long)max_write_ms);
-    const fs_writeback_stats *storage=fs_storage_stats();
-    reply("SD CACHE pending=%lu peak=%lu full=%lu error_stage=%lu hal=%lx",
-        (unsigned long)storage->queued_sectors,(unsigned long)storage->peak_sectors,
-        (unsigned long)storage->full_waits,(unsigned long)storage->error_stage,(unsigned long)fs_disk_last_error);
+    report_storage();
 }
 
 static int select_paths(uint32_t token, unsigned auto_mode)
@@ -655,6 +683,7 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
     const char *step = "SD"; int code = 0;
     if (state == RECORDING || state == SAVING || usb_tf_connected() || !board_sd_ready()) { reply("ERR BUSY/USB/SD"); return; }
     automatic = auto_mode; camera_mode = use_camera; failed = 0;
+    memset(&last_failure, 0, sizeof(last_failure));
     saved_frames = saved_imu = imu_gaps = movi_bytes = biggest = log_used = log_seq = max_write_ms = csv_rows = 0;
     det_evals = det_hits = enc_fails = 0;
     t_detect_us = t_annotate_us = t_encode_us = t_write_us = t_frame_us = 0;
@@ -717,8 +746,10 @@ static void prepare_session(uint32_t token, unsigned auto_mode, unsigned use_cam
     reply("SESSION PREPARE auto=%u id=%06lX", automatic, (unsigned long)session_token);
     return;
 fail:
+    remember_failure(step, code);
     failed = 1; cancel_preparation(); state = ERROR_STATE; send_led();
     reply("ERR PREPARE step=%s code=%d", step, code);
+    report_storage();
 }
 static void status(void)
 {
@@ -736,6 +767,7 @@ static void status(void)
           (unsigned long)(t_frame_us / 1000));
     reply("ERR cam=%lu drop=%lu imuq=%lu crc=%lu uart=%lu", (unsigned long)camera_errors,
           (unsigned long)camera_drops, (unsigned long)imu_overflows, (unsigned long)parser.errors, (unsigned long)uart_errors);
+    report_storage();
 }
 static void command(char *text)
 {
@@ -794,7 +826,9 @@ int main(void)
     reply("BOOT Dart AutoRecord H750 " DART_RECORDING_VERSION " clock=%d storage=%d", clock, storage);
     if (clock || storage) state = ERROR_STATE;
     for (;;) {
-        if ((state==PREPARING || state==ARMED || state==RECORDING) && fs_storage_poll()) failed=1;
+        if ((state==PREPARING || state==ARMED || state==RECORDING) && fs_storage_poll()) {
+            remember_failure("SD WRITEBACK", -1); failed=1;
+        }
         process_replies();
         if (HAL_GetTick() - last_led_sent >= 500) send_led();
         /* 电脑在原生USB端连接时只读卡，避免拿起板子读文件时误触发。 */
@@ -819,17 +853,26 @@ int main(void)
                 if (automatic) { state = ARMED; memset(&trigger, 0, sizeof(trigger)); reply("AUTO READY threshold=2000mg hold=20ms folder=%s", directory); send_led(); }
                 else { unsigned latest = (pre_head + DART_AUTO_PRE_SAMPLES - 1) % DART_AUTO_PRE_SAMPLES; begin_recording(&pre_trigger[latest]); }
             }
-            if (state == PREPARING && (uint32_t)(board_micros() - prepare_us) > 2000000u) failed = 1;
+            if (state == PREPARING && (uint32_t)(board_micros() - prepare_us) > 2000000u) {
+                remember_failure("WAIT READY", -1); failed = 1;
+            }
             if (state == ARMED || state == RECORDING) {
                 if ((uint32_t)(board_micros() - sync_sent) > 1000000u && !sync_pending) sync_request();
                 if (sync_pending && (uint32_t)(board_micros() - sync_sent) > 100000u) sync_pending = 0;
-                if (dart_is_stale(board_micros(), last_imu_rx, 1000000u) ||
-                    (camera_mode && dart_is_stale(board_micros(), last_good_frame, 1000000u)) || camera_errors) failed = 1;
-                if (imu_overflows != session_imu_overflows) failed = 1;
+                if (dart_is_stale(board_micros(), last_imu_rx, 1000000u)) {
+                    remember_failure("IMU STALE", -1); failed = 1;
+                }
+                if (camera_mode && dart_is_stale(board_micros(), last_good_frame, 1000000u)) {
+                    remember_failure("CAM STALE", -1); failed = 1;
+                }
+                if (camera_errors) { remember_failure("CAM ERROR", -1); failed = 1; }
+                if (imu_overflows != session_imu_overflows) { remember_failure("IMU QUEUE", -1); failed = 1; }
             }
             if (state == RECORDING && (failed || (int32_t)(board_micros() - end_us) >= 0)) close_session();
             else if (failed && (state == PREPARING || state == ARMED)) {
-                cancel_preparation(); state = ERROR_STATE; send_led(); reply("ERR AUTO IMU/CAMERA/QUEUE; not armed");
+                remember_failure("PREPARE IO", -1);
+                cancel_preparation(); state = ERROR_STATE; send_led(); reply("ERR AUTO; not armed");
+                report_storage();
             }
         }
     }

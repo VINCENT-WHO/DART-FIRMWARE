@@ -32,7 +32,9 @@ subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror','-Wno-misleading
     '-I'+str(ROOT/'tests/sd_hal_mock'),'-I'+str(ROOT/'h750'),'-I'+str(ROOT/'vendor/fatfs/source'),
     str(ROOT/'tests/test_sd_writeback.c'),str(ROOT/'h750/diskio_sd.c'),
     str(ROOT/'vendor/fatfs/source/ff.c'),'-o',str(sd_exe)],check=True)
-for case in ['', 'partition', 'fatfs', 'start', 'dma', 'late_dma', 'card', 'dma_timeout', 'card_timeout', 'protect', 'usb']:
+for case in ['', 'partition', 'fatfs', 'completion_race', 'completion_wrap', 'stop_error_race',
+             'sync_read_timeout', 'sync_write_timeout', 'sync_read_error', 'sync_write_error',
+             'start', 'dma', 'late_dma', 'card', 'dma_timeout', 'card_timeout', 'protect', 'usb']:
     subprocess.run([str(sd_exe)]+([case] if case else []),check=True)
 detector_exe=out/('test_rgb_detector.exe' if os.name=='nt' else 'test_rgb_detector')
 subprocess.run([cc,'-std=c11','-O2','-Wall','-Wextra','-Werror',
@@ -90,5 +92,7 @@ report={'result':'PASS','c_randomized_cases':10000,'python_wire_lengths':81,'crc
 report['roi_bounds_halo_motion_reacquire_reset']='PASS'
 report['jpeg_direct_output_callbacks_capacity_and_recovery']='PASS'
 report['sd_writeback_stalls_backpressure_coherence_faults_fatfs_remount']='PASS'
+report['sd_completion_irq_clock_race_wrap_and_stop_error']='PASS'
+report['sd_sync_preparation_errors_and_timeout_abort']='PASS'
 (out/'validation.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
 print(json.dumps(report,indent=2))
